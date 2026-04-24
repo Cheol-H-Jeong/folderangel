@@ -65,13 +65,21 @@ class OrganizeWorker(QtCore.QObject):
 
 
 def _stage_from_msg(msg: str) -> str:
-    m = msg.lower()
-    if m.startswith("stage-a") or m.startswith("stage-b") or m.startswith("stage-merge") or m == "plan" or m == "mock-planner":
-        return "plan"
-    if m == "organize":
-        return "organize"
-    if m == "scan":
+    m = msg.strip().lower()
+    if m.startswith("scan"):
         return "scan"
-    if any(msg.endswith(ext) for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".hwp", ".hwpx")):
+    if m.startswith("parse") or any(msg.lower().endswith(ext) for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".hwp", ".hwpx", ".txt", ".md")):
         return "parse"
+    if (
+        m.startswith("plan")
+        or m.startswith("stage-a")
+        or m.startswith("stage-b")
+        or m.startswith("stage-merge")
+        or m.startswith("mock-planner")
+        or m.startswith("plan-design")
+        or m.startswith("plan-assign")
+    ):
+        return "plan"
+    if m.startswith("organize") or m.startswith("move") or m.startswith("  ↳") or m.startswith("  ⚠"):
+        return "organize"
     return "organize"

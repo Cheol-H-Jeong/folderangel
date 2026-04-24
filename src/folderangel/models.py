@@ -40,6 +40,8 @@ class Category:
     id: str
     name: str
     description: str = ""
+    time_label: str = ""    # e.g. "2024", "2024-Q1", "2024-03" or "" if unknown
+    group: int = 0          # 1..9 — visual grouping prefix; 0 means ungrouped
 
     def to_dict(self) -> dict:
         return asdict(self)

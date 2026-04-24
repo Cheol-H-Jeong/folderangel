@@ -8,6 +8,7 @@ consume.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import unicodedata
@@ -54,6 +55,68 @@ def sanitize_folder_name(name: str, fallback: str = "folder") -> str:
     return cleaned[:120]
 
 
+def compose_folder_name(cat: Category) -> str:
+    """Build the on-disk folder name from a :class:`Category`.
+
+    Convention: ``"{group}. {name} ({time_label})"`` with optional pieces
+    omitted gracefully.  Group 0 produces no prefix, empty time produces no
+    suffix.  Examples::
+
+        Category("a", "AVOCA 시스템", group=2, time_label="2024-Q3")
+            → "2. AVOCA 시스템 (2024-Q3)"
+        Category("a", "프로젝트 외 자료", group=0, time_label="")
+            → "프로젝트 외 자료"
+    """
+    parts: list[str] = []
+    if cat.group:
+        parts.append(f"{int(cat.group)}.")
+    parts.append(cat.name or cat.id)
+    if cat.time_label:
+        parts.append(f"({cat.time_label})")
+    return sanitize_folder_name(" ".join(parts))
+
+
+# ----- Time-label helpers ------------------------------------------------
+
+def _parse_time_label(label: str) -> Optional[datetime]:
+    """Heuristic: turn '2024', '2024-Q1', '2024-03' into a representative dt.
+
+    Returns None when the label is empty or unparseable.  We pick the middle
+    of the period so it sorts naturally in file-manager date columns.
+    """
+    if not label:
+        return None
+    s = label.strip()
+    m = re.fullmatch(r"(\d{4})-Q([1-4])", s)
+    if m:
+        year = int(m.group(1))
+        q = int(m.group(2))
+        month = (q - 1) * 3 + 2  # mid-quarter month
+        return datetime(year, month, 15)
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})", s)
+    if m:
+        return datetime(int(m.group(1)), max(1, min(12, int(m.group(2)))), 15)
+    m = re.fullmatch(r"(\d{4})", s)
+    if m:
+        return datetime(int(m.group(1)), 6, 15)
+    return None
+
+
+def _set_dir_mtime(path: Path, dt: datetime) -> None:
+    try:
+        ts = dt.timestamp()
+        os.utime(path, (ts, ts))
+    except (OSError, OverflowError, ValueError) as exc:
+        log.debug("set mtime failed for %s: %s", path, exc)
+
+
+def _walk_dirs(root: Path):
+    for entry in os.scandir(root):
+        if entry.is_dir(follow_symlinks=False):
+            yield entry.path
+            yield from _walk_dirs(Path(entry.path))
+
+
 def _unique_path(target: Path) -> Path:
     if not target.exists():
         return target
@@ -84,11 +147,16 @@ class Organizer:
 
         # Pre-compute safe folder paths for each category id, but *defer*
         # directory creation until we actually place a file (so empty
-        # categories don't clutter the target root).
+        # categories don't clutter the target root).  Sort by group/name so
+        # the on-disk order reflects the LLM's relevance grouping.
+        ordered = sorted(
+            plan.categories,
+            key=lambda c: (c.group or 99, c.time_label or "~", c.name or c.id),
+        )
         dir_for: dict[str, Path] = {}
         used_names: set[str] = set()
-        for cat in plan.categories:
-            name = sanitize_folder_name(cat.name or cat.id)
+        for cat in ordered:
+            name = compose_folder_name(cat)
             base = name
             counter = 2
             while name.lower() in used_names:
@@ -112,8 +180,13 @@ class Organizer:
 
         total = max(1, len(plan.assignments))
         for idx, assign in enumerate(plan.assignments, 1):
+            cat_for_msg = next((c for c in plan.categories if c.id == assign.primary_category_id), None)
+            cat_label = cat_for_msg.name if cat_for_msg else assign.primary_category_id
             if progress:
-                progress(assign.file_path.name, idx / total)
+                progress(
+                    f"move [{idx}/{total}] {assign.file_path.name} → {cat_label}",
+                    idx / total,
+                )
             try:
                 moved_entry = self._apply_one(
                     assign, plan, dir_for, target_root, dry_run, ensure_dir
@@ -122,6 +195,8 @@ class Organizer:
                     moved.append(moved_entry)
                     used_category_ids.add(moved_entry.category_id)
                     for sp in moved_entry.shortcuts:
+                        if progress:
+                            progress(f"  ↳ 바로가기: {sp.name}", idx / total)
                         # Track categories that received shortcuts too.
                         for cid, cdir in dir_for.items():
                             try:
@@ -132,10 +207,30 @@ class Organizer:
                                 continue
             except Exception as exc:
                 log.warning("organize failed for %s: %s", assign.file_path, exc)
+                if progress:
+                    progress(f"  ⚠ 스킵: {assign.file_path.name} ({exc})", idx / total)
                 skipped.append(SkippedFile(path=assign.file_path, reason=str(exc)))
 
         # Report only the categories that ended up hosting at least one file.
         surviving_categories = [c for c in plan.categories if c.id in used_category_ids]
+
+        # Stamp folder mtimes from the LLM-provided time_label so file
+        # managers can sort folders chronologically.
+        if not dry_run:
+            if progress:
+                progress("organize: 폴더 시기(mtime) 적용", 0.97)
+            for cat in surviving_categories:
+                dt = _parse_time_label(cat.time_label)
+                d = dir_for.get(cat.id)
+                if dt is not None and d is not None and d.is_dir():
+                    _set_dir_mtime(d, dt)
+
+            # Empty-folder cleanup: any subdirectory under the target root
+            # that is now empty (whether we created it or it pre-existed)
+            # gets removed so the result is tidy.
+            if progress:
+                progress("organize: 빈 폴더 정리", 0.99)
+            self._sweep_empty_dirs(target_root)
 
         finished_at = datetime.now().astimezone()
         return OperationResult(
@@ -148,6 +243,26 @@ class Organizer:
             skipped=skipped,
             total_scanned=len(plan.assignments),
         )
+
+    # -----------------------------------------------------------------
+    def _sweep_empty_dirs(self, root: Path) -> None:
+        """Remove empty subdirectories under *root*, depth-first.
+
+        Only directories are touched; the root itself is preserved.  We sort
+        deepest-first so that nested empty trees collapse correctly.
+        """
+        try:
+            all_dirs = [Path(d) for d in _walk_dirs(root)]
+        except FileNotFoundError:
+            return
+        for d in sorted(all_dirs, key=lambda p: len(p.parts), reverse=True):
+            if d == root:
+                continue
+            try:
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError as exc:
+                log.debug("rmdir skipped %s: %s", d, exc)
 
     # -----------------------------------------------------------------
     def _apply_one(

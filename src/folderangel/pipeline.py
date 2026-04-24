@@ -31,20 +31,26 @@ def gather_entries(
     recursive: bool,
     progress: Optional[ProgressCB] = None,
 ) -> list[FileEntry]:
+    if progress:
+        progress("scan: 폴더 검사 시작", 0.0)
     paths = scan(
         root,
         recursive=recursive,
         ignore_patterns=config.ignore_patterns if not config.include_hidden else [],
         max_files=config.max_files,
     )
+    if progress:
+        progress(f"scan: {len(paths)}개 파일 발견", 0.05)
     entries: list[FileEntry] = []
     for idx, p in enumerate(paths, 1):
         if progress:
-            progress(p.name, idx / max(1, len(paths)))
+            progress(f"parse [{idx}/{len(paths)}] {p.name}", idx / max(1, len(paths)))
         try:
             entry = collect(p)
         except Exception as exc:
             log.warning("metadata failed %s: %s", p, exc)
+            if progress:
+                progress(f"  ⚠ 메타데이터 실패: {p.name} ({exc})", idx / max(1, len(paths)))
             continue
         entry.content_excerpt = extract_excerpt(
             p, max_chars=config.max_excerpt_chars, timeout=config.parse_timeout_s
@@ -63,8 +69,6 @@ def run(
     force_mock: bool = False,
 ) -> OperationResult:
     target_root = Path(target_root)
-    if progress:
-        progress("scan", 0.0)
     entries = gather_entries(target_root, config, recursive, progress)
 
     client: Optional[GeminiClient] = None
@@ -78,12 +82,16 @@ def run(
                 client = None
 
     if progress:
-        progress("plan", 0.0)
+        if client is not None:
+            progress(f"plan: Gemini ({config.model}) 호출 준비", 0.0)
+        else:
+            progress("plan: Mock 휴리스틱 모드", 0.0)
     planner = Planner(config, gemini=client)
     plan: Plan = planner.plan(entries, progress=progress)
 
     if progress:
-        progress("organize", 0.0)
+        progress(f"plan: 카테고리 {len(plan.categories)}개 결정됨", 0.95)
+        progress(f"organize: 파일 이동 시작 ({len(plan.assignments)}개)", 0.0)
     organizer = Organizer(config)
     op = organizer.execute(target_root, plan, dry_run=dry_run, progress=progress)
 

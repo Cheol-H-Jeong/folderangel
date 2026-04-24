@@ -84,7 +84,18 @@ class OrganizeView(QtWidgets.QWidget):
         self.progress_label = QtWidgets.QLabel("대기 중")
         self.progress_label.setStyleSheet("color:#6e6e73;")
         pc.addWidget(self.progress_label)
-        outer.addWidget(self.progress_card)
+
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setMinimumHeight(140)
+        self.log_view.setStyleSheet(
+            "QPlainTextEdit { background:#0f1115; color:#d6d6dc; border-radius:10px;"
+            " padding:10px; font-family:'JetBrains Mono','SF Mono',Menlo,Consolas,monospace; font-size:12px; }"
+        )
+        self.log_view.setPlaceholderText("진행 로그가 여기에 한 줄씩 표시됩니다.")
+        pc.addWidget(self.log_view, 1)
+        outer.addWidget(self.progress_card, 1)
 
         # Action row
         actions = QtWidgets.QHBoxLayout()
@@ -142,7 +153,6 @@ class OrganizeView(QtWidgets.QWidget):
         rc.addWidget(self.cat_table, 1)
 
         outer.addWidget(self.report_card, 1)
-        outer.addStretch(1)
         self.refresh_api_badge()
 
     # ------------------------------------------------------------------
@@ -176,13 +186,23 @@ class OrganizeView(QtWidgets.QWidget):
             self.progress_bar.setValue(0)
             self.stage_ind.reset()
             self.progress_label.setText("시작 중…")
+            self.log_view.clear()
 
     def on_stage(self, stage: str, pct: float):
         self.stage_ind.set_active(stage)
         self.progress_bar.setValue(max(0, min(100, int(pct * 100))))
 
     def on_status(self, text: str):
-        self.progress_label.setText(text)
+        # Single short label up top + line-by-line tail in the log view.
+        head = text if len(text) <= 90 else text[:87] + "…"
+        self.progress_label.setText(head)
+        from datetime import datetime as _dt
+
+        ts = _dt.now().strftime("%H:%M:%S")
+        self.log_view.appendPlainText(f"[{ts}] {text}")
+        # auto-scroll to bottom
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def on_finished(self, op: OperationResult):
         self._last_op = op

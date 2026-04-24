@@ -78,7 +78,12 @@ SINGLE_CALL_INSTRUCTION = """아래 전체 파일 목록을 보고, **한 번의
 2) 각 파일을 그 폴더에 분류하라.
 
 요구사항:
-- categories[].name 은 가능한 한 **구체적인 프로젝트/사업/고객사 이름**.
+- categories[].name 은 **구체적인 프로젝트/사업/고객사 이름** (시기 표기는 빼고 본질만).
+- categories[].time_label 은 그 폴더에 모이는 파일들의 **대표 시기** 표기를 한국어로 짧게:
+  연·월이 명확하면 "2024", "2024-Q1", "2024-03" 형태, 모호하면 빈 문자열 "".
+- categories[].group 은 **관련성/주제별 묶음 번호**(1~9 정수). 같은 group 번호는
+  서로 비슷한 성격의 폴더끼리 부여한다. 예: 동일 고객사의 여러 사업이면 같은 group,
+  내부 행사·잡파일류는 또 다른 group. 결과적으로 폴더 정렬을 도와준다.
 - assignments 의 path 는 입력으로 준 path 값을 **그대로** 복사한다(요약·축약·번역 금지).
 - primary 는 categories[].id 중 하나여야 한다.
 - primary_score 와 차이가 {ambiguity_threshold} 이하인 다른 후보가 있으면 secondary 에 넣는다.
@@ -87,7 +92,13 @@ SINGLE_CALL_INSTRUCTION = """아래 전체 파일 목록을 보고, **한 번의
 응답 JSON 스키마(엄격, 추가 텍스트 금지):
 {{
   "categories": [
-    {{ "id": "kebab-slug", "name": "구체 프로젝트/사업명", "description": "한 줄 설명" }}
+    {{
+      "id": "kebab-slug",
+      "name": "구체 프로젝트/사업명",
+      "description": "한 줄 설명",
+      "time_label": "2024-Q1",
+      "group": 1
+    }}
   ],
   "assignments": [
     {{

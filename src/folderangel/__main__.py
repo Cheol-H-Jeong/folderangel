@@ -27,7 +27,7 @@ def _run_cli(args) -> int:
     db = IndexDB(paths.index_db)
 
     def _print(stage: str, pct: float):
-        sys.stdout.write(f"\r[{stage:<10}] {pct*100:5.1f}% ")
+        sys.stdout.write(f"[{pct*100:5.1f}%] {stage}\n")
         sys.stdout.flush()
 
     try:

@@ -275,10 +275,21 @@ def _closest_category(unknown_id: str, categories: list[dict]) -> str:
 
 def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
     by_path = {str(e.path): e for e in entries}
-    cats = [
-        Category(id=c["id"], name=c.get("name", c["id"]), description=c.get("description", ""))
-        for c in data.get("categories", [])
-    ]
+    cats: list[Category] = []
+    for c in data.get("categories", []):
+        try:
+            group_val = int(c.get("group", 0) or 0)
+        except (TypeError, ValueError):
+            group_val = 0
+        cats.append(
+            Category(
+                id=c["id"],
+                name=c.get("name", c["id"]),
+                description=c.get("description", ""),
+                time_label=str(c.get("time_label", "") or "").strip(),
+                group=max(0, min(9, group_val)),
+            )
+        )
     cat_ids = {c.id for c in cats}
     if "misc" not in cat_ids:
         cats.append(Category(id="misc", name="기타", description="분류되지 않은 파일"))
