@@ -31,8 +31,8 @@ class GeminiClient:
         self,
         api_key: str,
         model: str = "gemini-2.5-flash",
-        timeout: float = 60.0,
-        max_retries: int = 1,
+        timeout: float = 180.0,
+        max_retries: int = 3,
     ) -> None:
         if not api_key:
             raise LLMError("empty api key")
@@ -62,11 +62,23 @@ class GeminiClient:
         attempt = 0
         last_exc: Optional[Exception] = None
         while attempt <= self.max_retries:
+            # Lengthen the read timeout on each retry — the API often just
+            # needs more wall-clock time on long batches.
+            current_timeout = self.timeout * (1.0 + 0.5 * attempt)
             try:
                 resp = requests.post(
-                    url, params=params, headers=headers, json=body, timeout=self.timeout
+                    url,
+                    params=params,
+                    headers=headers,
+                    json=body,
+                    timeout=(15.0, current_timeout),  # (connect, read)
                 )
                 if resp.status_code >= 400:
+                    # Retry on transient 429 / 5xx; otherwise fail fast.
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        raise LLMError(
+                            f"gemini transient http {resp.status_code}: {resp.text[:200]}"
+                        )
                     raise LLMError(
                         f"gemini http {resp.status_code}: {resp.text[:300]}"
                     )
@@ -80,9 +92,16 @@ class GeminiClient:
                     return json.loads(stripped)
             except (requests.RequestException, LLMError, json.JSONDecodeError) as exc:
                 last_exc = exc
-                log.warning("gemini call failed (attempt %d): %s", attempt + 1, exc)
+                log.warning(
+                    "gemini call failed (attempt %d/%d, timeout=%.0fs): %s",
+                    attempt + 1,
+                    self.max_retries + 1,
+                    current_timeout,
+                    exc,
+                )
                 attempt += 1
-                time.sleep(0.5 * (2 ** attempt))
+                if attempt <= self.max_retries:
+                    time.sleep(min(20.0, 1.5 * (2 ** attempt)))
         raise LLMError(f"gemini failed after retries: {last_exc}")
 
 

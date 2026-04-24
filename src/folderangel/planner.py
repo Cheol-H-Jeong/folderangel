@@ -63,7 +63,15 @@ class Planner:
         if not entries:
             return Plan(categories=[], assignments=[])
 
-        payloads = [e.to_summary_dict() for e in entries]
+        # Build LLM payloads, capping the per-file excerpt so a single
+        # giant slide deck cannot blow the request size or read timeout.
+        per_file_cap = min(self.config.max_excerpt_chars, 1200)
+        payloads = []
+        for e in entries:
+            d = e.to_summary_dict()
+            excerpt = d.get("excerpt", "") or ""
+            d["excerpt"] = excerpt[:per_file_cap]
+            payloads.append(d)
 
         # Short-circuit if there's no Gemini client — everything is mock.
         if self.gemini is None:
@@ -126,19 +134,12 @@ class Planner:
                     f"stage-b {idx}/{len(batches)}",
                     0.5 + (idx / max(1, len(batches))) * 0.4,
                 )
-            prompt = prompts.build_stage_b(
-                batch, categories_payload, self.config.ambiguity_threshold
-            )
             try:
-                resp = self.gemini.generate_json(prompt)
-                assigns = resp.get("assignments") or []
-                if not isinstance(assigns, list):
-                    raise LLMError("assignments not a list")
+                assigns = self._stage_b_call(batch, categories_payload)
                 assignments_raw.extend(assigns)
             except Exception as exc:
                 log.warning("stage-B fallback to mock batch %d: %s", idx, exc)
                 mock_out = mock_planner.plan(batch, self.config.ambiguity_threshold)
-                # Remap mock category ids if they are unknown to the final categories.
                 for a in mock_out["assignments"]:
                     if a["primary"] not in category_ids:
                         a["primary"] = _closest_category(a["primary"], categories_payload)
@@ -147,6 +148,36 @@ class Planner:
         # Build the final Plan, coercing unknown ids to the best available fallback.
         plan_dict = {"categories": categories_payload, "assignments": assignments_raw}
         return _plan_from_dict(plan_dict, entries)
+
+
+    # ------------------------------------------------------------------
+    def _stage_b_call(self, batch: list[dict], categories_payload: list[dict]) -> list[dict]:
+        """Run Stage B for one batch.
+
+        On timeout/JSON failure we split the batch in halves and retry, which
+        usually clears the read timeout because the prompt becomes shorter.
+        Recurses down to single-file batches before giving up.
+        """
+        prompt = prompts.build_stage_b(
+            batch, categories_payload, self.config.ambiguity_threshold
+        )
+        try:
+            resp = self.gemini.generate_json(prompt)
+        except LLMError as exc:
+            if len(batch) <= 1:
+                raise
+            log.warning(
+                "stage-B split (%d → %d+%d) after error: %s",
+                len(batch), len(batch) // 2, len(batch) - len(batch) // 2, exc,
+            )
+            mid = len(batch) // 2
+            return self._stage_b_call(batch[:mid], categories_payload) + self._stage_b_call(
+                batch[mid:], categories_payload
+            )
+        assigns = resp.get("assignments") or []
+        if not isinstance(assigns, list):
+            raise LLMError("assignments not a list")
+        return assigns
 
 
 def _closest_category(unknown_id: str, categories: list[dict]) -> str:
