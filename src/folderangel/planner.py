@@ -80,6 +80,22 @@ class Planner:
             plan_dict = mock_planner.plan(payloads, self.config.ambiguity_threshold)
             return _plan_from_dict(plan_dict, entries)
 
+        # ------------------------------------------------------------------
+        # Economy mode: a single LLM call covers categorisation + assignment.
+        # This minimises inference count (1 call for ≤ ``economy_max_files``
+        # files; 2–3 small calls if we have to chunk) and lets the model see
+        # every filename at once, which is critical for spotting recurring
+        # project / customer / system names.
+        if getattr(self.config, "economy_mode", True):
+            try:
+                if progress:
+                    progress("plan", 0.2)
+                plan_dict = self._single_call_plan(payloads, progress)
+                return _plan_from_dict(plan_dict, entries)
+            except Exception as exc:
+                log.warning("economy single-call plan failed; falling back: %s", exc)
+                # Fall through to the original two-stage path on hard failure.
+
         # ---------- Stage A ----------
         candidate_sets: list[list[dict]] = []
         batches = list(_batched(payloads, self.config.batch_size))
@@ -149,6 +165,76 @@ class Planner:
         plan_dict = {"categories": categories_payload, "assignments": assignments_raw}
         return _plan_from_dict(plan_dict, entries)
 
+
+    # ------------------------------------------------------------------
+    def _single_call_plan(
+        self,
+        payloads: list[dict],
+        progress: Optional[ProgressCB],
+    ) -> dict:
+        """One Gemini call covers both folder design and file assignment.
+
+        If the file count exceeds ``economy_max_files`` we (a) ask the LLM
+        once on a representative sample to discover the project-level
+        categories, then (b) do per-chunk assignment using those fixed
+        categories.  Even in the chunked path we use **at most**
+        ``ceil(N / economy_max_files) + 1`` calls.
+        """
+        cap = max(20, int(getattr(self.config, "economy_max_files", 120)))
+
+        if len(payloads) <= cap:
+            prompt = prompts.build_single_call(
+                payloads,
+                self.config.min_categories,
+                self.config.max_categories,
+                self.config.ambiguity_threshold,
+            )
+            resp = self.gemini.generate_json(prompt)
+            cats = resp.get("categories") or []
+            assigns = resp.get("assignments") or []
+            if not cats or not isinstance(assigns, list):
+                raise LLMError("single-call response missing categories/assignments")
+            return {"categories": cats, "assignments": assigns}
+
+        # Too many files for one call — design categories from a representative
+        # slice (every Nth file across the corpus), then assign in chunks.
+        step = max(1, len(payloads) // cap)
+        sample = payloads[::step][:cap]
+        if progress:
+            progress("plan-design", 0.25)
+        design_prompt = prompts.build_single_call(
+            sample,
+            self.config.min_categories,
+            self.config.max_categories,
+            self.config.ambiguity_threshold,
+        )
+        design = self.gemini.generate_json(design_prompt)
+        categories = design.get("categories") or []
+        if not categories:
+            raise LLMError("design pass returned no categories")
+
+        # Reuse the (relatively) cheap Stage-B prompt for the per-chunk
+        # assignment so the LLM doesn't waste tokens redesigning categories.
+        assignments_raw: list[dict] = []
+        chunks = list(_batched(payloads, cap))
+        for idx, chunk in enumerate(chunks, 1):
+            if progress:
+                progress(
+                    f"plan-assign {idx}/{len(chunks)}",
+                    0.3 + 0.6 * (idx / len(chunks)),
+                )
+            try:
+                assigns = self._stage_b_call(chunk, categories)
+                assignments_raw.extend(assigns)
+            except Exception as exc:
+                log.warning("economy assign chunk %d fell back to mock: %s", idx, exc)
+                m = mock_planner.plan(chunk, self.config.ambiguity_threshold)
+                category_ids = {c["id"] for c in categories}
+                for a in m["assignments"]:
+                    if a["primary"] not in category_ids:
+                        a["primary"] = _closest_category(a["primary"], categories)
+                assignments_raw.extend(m["assignments"])
+        return {"categories": categories, "assignments": assignments_raw}
 
     # ------------------------------------------------------------------
     def _stage_b_call(self, batch: list[dict], categories_payload: list[dict]) -> list[dict]:

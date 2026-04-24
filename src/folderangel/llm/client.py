@@ -40,6 +40,10 @@ class GeminiClient:
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+        # Usage counters so the user can see how much the run cost.
+        self.request_count: int = 0
+        self.prompt_chars: int = 0
+        self.response_chars: int = 0
 
     # ------------------------------------------------------------------
     def generate_json(self, prompt: str, temperature: float = 0.2) -> dict[str, Any]:
@@ -58,6 +62,8 @@ class GeminiClient:
                 "response_mime_type": "application/json",
             },
         }
+
+        self.prompt_chars += len(prompt)
 
         attempt = 0
         last_exc: Optional[Exception] = None
@@ -84,6 +90,8 @@ class GeminiClient:
                     )
                 data = resp.json()
                 text = _extract_text(data)
+                self.request_count += 1
+                self.response_chars += len(text)
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:

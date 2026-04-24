@@ -21,10 +21,9 @@ def _run_cli(args) -> int:
 
     paths = default_paths()
     config = load_config(paths)
-    if args.mock:
-        force_mock = True
-    else:
-        force_mock = False
+    if args.no_economy:
+        config.economy_mode = False
+    force_mock = bool(args.mock)
     db = IndexDB(paths.index_db)
 
     def _print(stage: str, pct: float):
@@ -49,6 +48,16 @@ def _run_cli(args) -> int:
         f"shortcuts={op.total_shortcuts} skipped={op.total_skipped} "
         f"categories={len(op.categories)}"
     )
+    if op.llm_usage is not None:
+        u = op.llm_usage
+        if u.model == "mock" or u.request_count == 0:
+            print("LLM   — 0 calls (mock)")
+        else:
+            print(
+                f"LLM   — {u.request_count} call(s) on {u.model}; "
+                f"~{u.estimated_prompt_tokens:,} prompt tokens, "
+                f"~{u.estimated_response_tokens:,} response tokens"
+            )
     return 0
 
 
@@ -60,6 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
     parser.add_argument("--dry-run", action="store_true", help="plan without moving files")
     parser.add_argument("--mock", action="store_true", help="force mock planner")
+    parser.add_argument(
+        "--no-economy",
+        action="store_true",
+        help="disable single-call economy mode (use per-batch staging)",
+    )
     parser.add_argument("--quiet", action="store_true")
 
     args = parser.parse_args(argv)

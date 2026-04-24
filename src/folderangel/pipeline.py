@@ -13,7 +13,7 @@ from .config import Config, get_api_key
 from .index import IndexDB
 from .llm import GeminiClient
 from .metadata import collect
-from .models import FileEntry, OperationResult, Plan
+from .models import FileEntry, LLMUsage, OperationResult, Plan
 from .organizer import Organizer
 from .parsers import extract_excerpt
 from .planner import Planner
@@ -86,6 +86,16 @@ def run(
         progress("organize", 0.0)
     organizer = Organizer(config)
     op = organizer.execute(target_root, plan, dry_run=dry_run, progress=progress)
+
+    if client is not None:
+        op.llm_usage = LLMUsage(
+            request_count=client.request_count,
+            prompt_chars=client.prompt_chars,
+            response_chars=client.response_chars,
+            model=config.model,
+        )
+    else:
+        op.llm_usage = LLMUsage(model="mock")
 
     if index_db is not None and not dry_run:
         try:

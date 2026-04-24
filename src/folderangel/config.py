@@ -59,6 +59,12 @@ class Config:
     include_hidden: bool = False
     language: str = "ko"
     appearance: str = "auto"  # auto | light | dark
+    # When True, ask the LLM exactly once for the whole corpus; only chunk
+    # automatically if the prompt is too large.  This is much cheaper and
+    # better for project-name discovery (the LLM sees every filename at once).
+    economy_mode: bool = True
+    # Soft cap on how many files we send in a single combined call.
+    economy_max_files: int = 120
     # API key is stored separately (keyring) but mirrored here only if keyring fails
     api_key_fallback: str = ""
     ignore_patterns: list[str] = field(

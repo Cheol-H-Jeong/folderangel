@@ -191,12 +191,18 @@ class OrganizeView(QtWidgets.QWidget):
         self.progress_label.setText(
             f"완료 — 이동 {op.total_moved}, 바로가기 {op.total_shortcuts}, 스킵 {op.total_skipped}"
         )
+        usage = op.llm_usage
+        if usage is None or usage.model == "mock" or usage.request_count == 0:
+            llm_label = "0 (Mock)"
+        else:
+            llm_label = f"{usage.request_count}회"
         self.stats_row.update_items(
             [
                 ("스캔 파일", str(op.total_scanned)),
                 ("이동", str(op.total_moved)),
                 ("바로가기", str(op.total_shortcuts)),
                 ("스킵", str(op.total_skipped)),
+                ("LLM 호출", llm_label),
             ]
         )
         from collections import Counter
@@ -414,6 +420,20 @@ class SettingsView(QtWidgets.QWidget):
         self.spin_excerpt.setValue(self.config.max_excerpt_chars)
         f.addRow("본문 최대 글자", self.spin_excerpt)
 
+        self.chk_economy = QtWidgets.QCheckBox("LLM 호출 최소화 (Economy 모드)")
+        self.chk_economy.setChecked(self.config.economy_mode)
+        self.chk_economy.setToolTip(
+            "한 번의 호출로 폴더 설계와 분류를 동시에 수행합니다.\n"
+            "프로젝트명 인식이 좋아지고 토큰 사용량이 크게 줄어듭니다."
+        )
+        f.addRow("LLM 호출 절약", self.chk_economy)
+
+        self.spin_econ_max = QtWidgets.QSpinBox()
+        self.spin_econ_max.setRange(20, 500)
+        self.spin_econ_max.setValue(self.config.economy_max_files)
+        self.spin_econ_max.setToolTip("Economy 모드에서 한 호출당 보내는 최대 파일 수")
+        f.addRow("호출당 최대 파일", self.spin_econ_max)
+
         self.cmb_appearance = QtWidgets.QComboBox()
         self.cmb_appearance.addItems(["auto", "light", "dark"])
         idx = self.cmb_appearance.findText(self.config.appearance)
@@ -457,6 +477,8 @@ class SettingsView(QtWidgets.QWidget):
         self.config.ambiguity_threshold = self.spin_amb.value()
         self.config.max_excerpt_chars = self.spin_excerpt.value()
         self.config.appearance = self.cmb_appearance.currentText()
+        self.config.economy_mode = self.chk_economy.isChecked()
+        self.config.economy_max_files = self.spin_econ_max.value()
         save_config(self.config)
         self.config_changed.emit()
         QtWidgets.QMessageBox.information(self, "저장됨", "설정이 저장되었습니다.")

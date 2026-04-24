@@ -28,6 +28,15 @@ def _build(op: OperationResult) -> str:
     lines.append(f"- 스캔: {op.total_scanned}개 / 이동: {op.total_moved}개 / 바로가기: {op.total_shortcuts}개 / 스킵: {op.total_skipped}개")
     if op.operation_id is not None:
         lines.append(f"- 오퍼레이션 ID: {op.operation_id}")
+    if op.llm_usage is not None:
+        u = op.llm_usage
+        if u.model == "mock" or u.request_count == 0:
+            lines.append("- LLM 사용: 0 호출 (Mock 휴리스틱)")
+        else:
+            lines.append(
+                f"- LLM 사용: {u.request_count}회 호출 ({u.model}) — "
+                f"입력 ≈ {u.estimated_prompt_tokens:,} 토큰 / 출력 ≈ {u.estimated_response_tokens:,} 토큰"
+            )
     lines.append("")
 
     # Category distribution

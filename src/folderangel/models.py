@@ -89,6 +89,23 @@ class SkippedFile:
 
 
 @dataclass
+class LLMUsage:
+    request_count: int = 0
+    prompt_chars: int = 0
+    response_chars: int = 0
+    model: str = ""
+
+    @property
+    def estimated_prompt_tokens(self) -> int:
+        # Heuristic: ~3 characters per token for mixed Korean/English.
+        return self.prompt_chars // 3
+
+    @property
+    def estimated_response_tokens(self) -> int:
+        return self.response_chars // 3
+
+
+@dataclass
 class OperationResult:
     target_root: Path
     started_at: datetime
@@ -99,6 +116,7 @@ class OperationResult:
     skipped: list[SkippedFile]
     total_scanned: int
     operation_id: Optional[int] = None
+    llm_usage: Optional[LLMUsage] = None
 
     @property
     def total_moved(self) -> int:
