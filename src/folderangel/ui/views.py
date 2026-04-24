@@ -190,7 +190,14 @@ class OrganizeView(QtWidgets.QWidget):
 
     def on_stage(self, stage: str, pct: float):
         self.stage_ind.set_active(stage)
-        self.progress_bar.setValue(max(0, min(100, int(pct * 100))))
+        if pct < 0:
+            # Indeterminate — show a busy/marquee bar so the user can see
+            # the app is still alive during long LLM calls.
+            self.progress_bar.setRange(0, 0)
+        else:
+            if self.progress_bar.maximum() == 0:
+                self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(max(0, min(100, int(pct * 100))))
 
     def on_status(self, text: str):
         # Single short label up top + line-by-line tail in the log view.

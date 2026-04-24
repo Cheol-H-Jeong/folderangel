@@ -101,10 +101,18 @@ class Planner:
         batches = list(_batched(payloads, self.config.batch_size))
         for idx, batch in enumerate(batches, 1):
             if progress:
-                progress(f"stage-a {idx}/{len(batches)}", (idx - 1) / max(1, len(batches)) * 0.4)
+                progress(
+                    f"stage-a [{idx}/{len(batches)}] Gemini 호출 ({len(batch)} 파일)…",
+                    (idx - 1) / max(1, len(batches)) * 0.4,
+                )
             prompt = prompts.build_stage_a(batch)
             try:
-                resp = self.gemini.generate_json(prompt)
+                resp = self.gemini.generate_json(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"stage-a [{idx}/{len(batches)}] Gemini 응답 대기", progress
+                    ),
+                )
                 cands = resp.get("candidates") or []
                 if not isinstance(cands, list):
                     raise LLMError("candidates not a list")
@@ -116,14 +124,17 @@ class Planner:
 
         # ---------- Stage A-merge ----------
         if progress:
-            progress("stage-merge", 0.45)
+            progress("stage-merge: 후보 카테고리 통합 중…", 0.45)
         try:
             merge_prompt = prompts.build_stage_merge(
                 candidate_sets,
                 self.config.min_categories,
                 self.config.max_categories,
             )
-            merged = self.gemini.generate_json(merge_prompt)
+            merged = self.gemini.generate_json(
+                merge_prompt,
+                heartbeat=self._heartbeat_for("stage-merge: Gemini 응답 대기", progress),
+            )
             categories_raw = merged.get("categories") or []
             if not categories_raw:
                 raise LLMError("empty merged categories")
@@ -147,11 +158,11 @@ class Planner:
         for idx, batch in enumerate(batches, 1):
             if progress:
                 progress(
-                    f"stage-b {idx}/{len(batches)}",
+                    f"stage-b [{idx}/{len(batches)}] Gemini 호출 ({len(batch)} 파일)…",
                     0.5 + (idx / max(1, len(batches))) * 0.4,
                 )
             try:
-                assigns = self._stage_b_call(batch, categories_payload)
+                assigns = self._stage_b_call(batch, categories_payload, progress)
                 assignments_raw.extend(assigns)
             except Exception as exc:
                 log.warning("stage-B fallback to mock batch %d: %s", idx, exc)
@@ -165,6 +176,17 @@ class Planner:
         plan_dict = {"categories": categories_payload, "assignments": assignments_raw}
         return _plan_from_dict(plan_dict, entries)
 
+
+    # ------------------------------------------------------------------
+    def _heartbeat_for(self, label: str, progress: Optional[ProgressCB]):
+        """Build a heartbeat callback that streams ``label … Ns`` lines."""
+        if progress is None:
+            return None
+
+        def _beat(elapsed: float):
+            progress(f"{label} … {elapsed:.0f}s 경과", -1.0)
+
+        return _beat
 
     # ------------------------------------------------------------------
     def _single_call_plan(
@@ -189,11 +211,23 @@ class Planner:
                 self.config.max_categories,
                 self.config.ambiguity_threshold,
             )
-            resp = self.gemini.generate_json(prompt)
+            if progress:
+                progress(f"plan: Gemini 호출 중 ({len(payloads)} 파일)…", -1.0)
+            resp = self.gemini.generate_json(
+                prompt,
+                heartbeat=self._heartbeat_for(
+                    f"plan: Gemini 응답 대기 중 ({len(payloads)} 파일)", progress
+                ),
+            )
             cats = resp.get("categories") or []
             assigns = resp.get("assignments") or []
             if not cats or not isinstance(assigns, list):
                 raise LLMError("single-call response missing categories/assignments")
+            if progress:
+                progress(
+                    f"plan: 응답 수신 — 카테고리 {len(cats)}, 분류 {len(assigns)}",
+                    -1.0,
+                )
             return {"categories": cats, "assignments": assigns}
 
         # Too many files for one call — design categories from a representative
@@ -201,14 +235,20 @@ class Planner:
         step = max(1, len(payloads) // cap)
         sample = payloads[::step][:cap]
         if progress:
-            progress("plan-design", 0.25)
+            progress(
+                f"plan-design: 폴더 설계 (Gemini, 샘플 {len(sample)} 파일)…",
+                -1.0,
+            )
         design_prompt = prompts.build_single_call(
             sample,
             self.config.min_categories,
             self.config.max_categories,
             self.config.ambiguity_threshold,
         )
-        design = self.gemini.generate_json(design_prompt)
+        design = self.gemini.generate_json(
+            design_prompt,
+            heartbeat=self._heartbeat_for("plan-design: Gemini 응답 대기", progress),
+        )
         categories = design.get("categories") or []
         if not categories:
             raise LLMError("design pass returned no categories")
@@ -220,11 +260,11 @@ class Planner:
         for idx, chunk in enumerate(chunks, 1):
             if progress:
                 progress(
-                    f"plan-assign {idx}/{len(chunks)}",
+                    f"plan-assign [{idx}/{len(chunks)}] Gemini 호출 ({len(chunk)} 파일)…",
                     0.3 + 0.6 * (idx / len(chunks)),
                 )
             try:
-                assigns = self._stage_b_call(chunk, categories)
+                assigns = self._stage_b_call(chunk, categories, progress)
                 assignments_raw.extend(assigns)
             except Exception as exc:
                 log.warning("economy assign chunk %d fell back to mock: %s", idx, exc)
@@ -237,7 +277,12 @@ class Planner:
         return {"categories": categories, "assignments": assignments_raw}
 
     # ------------------------------------------------------------------
-    def _stage_b_call(self, batch: list[dict], categories_payload: list[dict]) -> list[dict]:
+    def _stage_b_call(
+        self,
+        batch: list[dict],
+        categories_payload: list[dict],
+        progress: Optional[ProgressCB] = None,
+    ) -> list[dict]:
         """Run Stage B for one batch.
 
         On timeout/JSON failure we split the batch in halves and retry, which
@@ -248,7 +293,12 @@ class Planner:
             batch, categories_payload, self.config.ambiguity_threshold
         )
         try:
-            resp = self.gemini.generate_json(prompt)
+            resp = self.gemini.generate_json(
+                prompt,
+                heartbeat=self._heartbeat_for(
+                    f"stage-b: Gemini 응답 대기 ({len(batch)} 파일)", progress
+                ),
+            )
         except LLMError as exc:
             if len(batch) <= 1:
                 raise
@@ -257,9 +307,9 @@ class Planner:
                 len(batch), len(batch) // 2, len(batch) - len(batch) // 2, exc,
             )
             mid = len(batch) // 2
-            return self._stage_b_call(batch[:mid], categories_payload) + self._stage_b_call(
-                batch[mid:], categories_payload
-            )
+            return self._stage_b_call(
+                batch[:mid], categories_payload, progress
+            ) + self._stage_b_call(batch[mid:], categories_payload, progress)
         assigns = resp.get("assignments") or []
         if not isinstance(assigns, list):
             raise LLMError("assignments not a list")

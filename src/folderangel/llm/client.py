@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -46,7 +47,19 @@ class GeminiClient:
         self.response_chars: int = 0
 
     # ------------------------------------------------------------------
-    def generate_json(self, prompt: str, temperature: float = 0.2) -> dict[str, Any]:
+    def generate_json(
+        self,
+        prompt: str,
+        temperature: float = 0.2,
+        heartbeat: Optional[Callable[[float], None]] = None,
+    ) -> dict[str, Any]:
+        """Send *prompt* to Gemini and parse the JSON reply.
+
+        ``heartbeat`` is called from a background thread roughly once a
+        second with the elapsed seconds while the HTTP call is in flight.
+        Use it to keep a UI progress log moving so users don't think the
+        app is hung when a single long inference is running.
+        """
         url = _ENDPOINT.format(model=self.model)
         params = {"key": self.api_key}
         headers = {"Content-Type": "application/json"}
@@ -71,6 +84,24 @@ class GeminiClient:
             # Lengthen the read timeout on each retry — the API often just
             # needs more wall-clock time on long batches.
             current_timeout = self.timeout * (1.0 + 0.5 * attempt)
+            stop_evt = threading.Event()
+            start_ts = time.monotonic()
+
+            def _beat():
+                while not stop_evt.is_set():
+                    elapsed = time.monotonic() - start_ts
+                    if heartbeat is not None:
+                        try:
+                            heartbeat(elapsed)
+                        except Exception:
+                            pass
+                    if stop_evt.wait(1.0):
+                        break
+
+            beat_thread = None
+            if heartbeat is not None:
+                beat_thread = threading.Thread(target=_beat, daemon=True)
+                beat_thread.start()
             try:
                 resp = requests.post(
                     url,
@@ -110,6 +141,11 @@ class GeminiClient:
                 attempt += 1
                 if attempt <= self.max_retries:
                     time.sleep(min(20.0, 1.5 * (2 ** attempt)))
+                continue
+            finally:
+                stop_evt.set()
+                if beat_thread is not None:
+                    beat_thread.join(timeout=0.1)
         raise LLMError(f"gemini failed after retries: {last_exc}")
 
 
