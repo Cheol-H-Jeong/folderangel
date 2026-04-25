@@ -42,8 +42,7 @@ class OrganizeWorker(QtCore.QObject):
         try:
             def _progress(msg: str, pct: float):
                 if self._cancel:
-                    raise RuntimeError("canceled by user")
-                # derive a rough overall progress by stage prefix
+                    raise RuntimeError("canceled")
                 stage = _stage_from_msg(msg)
                 self.stage_changed.emit(stage, pct)
                 self.status.emit(msg)
@@ -57,13 +56,20 @@ class OrganizeWorker(QtCore.QObject):
                 progress=_progress,
                 cancel_check=lambda: self._cancel,
             )
-            self.finished.emit(op)
+            if self._cancel:
+                self.failed.emit("정리를 취소했습니다")
+            else:
+                self.finished.emit(op)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            text = str(exc) or type(exc).__name__
+            if self._cancel or "cancel" in text.lower() or "취소" in text:
+                self.failed.emit("정리를 취소했습니다")
+            else:
+                self.failed.emit(text)
 
     def cancel(self):
         self._cancel = True
-        self.status.emit("취소 중… (현재 작업이 안전하게 멈출 때까지 잠시 대기)")
+        self.status.emit("취소 중…")
 
 
 def _stage_from_msg(msg: str) -> str:

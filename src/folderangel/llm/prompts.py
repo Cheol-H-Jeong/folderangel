@@ -156,3 +156,71 @@ def build_stage_b(
         {"categories": categories, "files": files}, ensure_ascii=False, indent=2
     )
     return f"{STAGE_A_SYSTEM}\n\n{instr}\n\n데이터:\n{body}"
+
+
+# -----------------------------------------------------------------------
+# Compact prompts used by the "local LLM" micro-batch path so total token
+# count per call stays small even with 4k–8k context windows.
+# -----------------------------------------------------------------------
+
+
+COMPACT_SYSTEM = """너는 파일을 프로젝트/사업 단위로 묶는 전문가다.
+파일명에 반복적으로 나타나는 고객사명, 사업명, 시스템명, 약어, 버전 패턴을 찾아라.
+폴더명은 구체적으로 작성한다. "문서", "보고서", "프레젠테이션" 같은 추상 라벨은 금지.
+"""
+
+COMPACT_DISCOVER_INSTR = """이 파일들에서 잘게 쪼갠 카테고리 후보만 뽑아라.
+응답은 정확히 다음 JSON, 다른 텍스트 금지:
+{
+  "candidates": [
+    { "id": "kebab-slug", "name": "구체 이름", "keywords": ["힌트", "단서"] }
+  ]
+}"""
+
+
+COMPACT_MERGE_INSTR = """여러 배치에서 모은 카테고리 후보를 통합하라.
+- 의미가 비슷하면 합친다.
+- 최종 {min_categories}~{max_categories}개로 줄인다.
+- categories[].group(1~9), time_label("2024-Q1" 등) 도 부여하라.
+응답 JSON:
+{{
+  "categories": [
+    {{ "id":"slug","name":"구체 이름","description":"한 줄","time_label":"","group":1 }}
+  ]
+}}"""
+
+
+COMPACT_ASSIGN_INSTR = """주어진 categories 만 사용하여 각 파일을 분류하라.
+응답 JSON:
+{{
+  "assignments": [
+    {{ "path":"입력 path 그대로", "primary":"category_id",
+       "primary_score":0.0,
+       "secondary":[ {{"id":"category_id","score":0.0}} ],
+       "reason":"한 줄 사유" }}
+  ]
+}}
+임계값({ambiguity_threshold}) 이하로 차이나는 다른 카테고리만 secondary 에 추가."""
+
+
+def build_compact_discover(files: list[dict]) -> str:
+    body = json.dumps(files, ensure_ascii=False)
+    return f"{COMPACT_SYSTEM}\n\n{COMPACT_DISCOVER_INSTR}\n\nfiles:{body}"
+
+
+def build_compact_merge(
+    candidate_sets: list[list[dict]], min_categories: int, max_categories: int
+) -> str:
+    body = json.dumps({"batches": candidate_sets}, ensure_ascii=False)
+    instr = COMPACT_MERGE_INSTR.format(
+        min_categories=min_categories, max_categories=max_categories
+    )
+    return f"{COMPACT_SYSTEM}\n\n{instr}\n\nbatches:{body}"
+
+
+def build_compact_assign(
+    files: list[dict], categories: list[dict], ambiguity_threshold: float
+) -> str:
+    body = json.dumps({"categories": categories, "files": files}, ensure_ascii=False)
+    instr = COMPACT_ASSIGN_INSTR.format(ambiguity_threshold=ambiguity_threshold)
+    return f"{COMPACT_SYSTEM}\n\n{instr}\n\ndata:{body}"

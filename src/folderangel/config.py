@@ -103,6 +103,12 @@ class Config:
     economy_mode: bool = True
     # Soft cap on how many files we send in a single combined call.
     economy_max_files: int = 120
+    # Micro-batch path used for small-context local LLMs (Qwen / Llama /
+    # Phi running on Ollama / LM Studio etc.).  Auto-enabled when the
+    # provider is openai_compat; can be forced on/off here.
+    # ``auto`` = enable for openai_compat only.
+    local_microbatch_mode: str = "auto"  # auto | on | off
+    local_chunk_size: int = 12  # files per Pass-A and Pass-B call
     # API key is stored separately (keyring) but mirrored here only if keyring fails
     api_key_fallback: str = ""
     ignore_patterns: list[str] = field(

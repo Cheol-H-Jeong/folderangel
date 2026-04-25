@@ -154,6 +154,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _cancel(self):
         if self._worker:
             self._worker.cancel()
+        # Update the UI immediately so the user gets an instant
+        # acknowledgement, regardless of how quickly the worker thread
+        # actually unwinds.
+        if hasattr(self, "organize_view"):
+            self.organize_view.show_canceling()
+        # Give the worker a brief grace window to stop on its own
+        # (next safe checkpoint), then forcibly tear it down so the UI
+        # never appears stuck.
+        QtCore.QTimer.singleShot(800, self._force_teardown_after_cancel)
+
+    def _force_teardown_after_cancel(self):
+        if self._thread is None:
+            return
+        if self._thread.isRunning():
+            # Last-resort: ask the event loop to quit and, if that does
+            # not return, terminate the OS thread.  The worker holds no
+            # locks on the main GUI state, so this is safe.
+            self._thread.quit()
+            if not self._thread.wait(400):
+                try:
+                    self._thread.terminate()
+                    self._thread.wait(400)
+                except Exception:
+                    pass
+        self._teardown_worker()
+        self.organize_view.show_canceled()
 
     def _on_finished(self, op):
         self.organize_view.on_finished(op)

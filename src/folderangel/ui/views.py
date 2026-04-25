@@ -52,6 +52,22 @@ class OrganizeView(QtWidgets.QWidget):
         self.path_bar = PathDropBar()
         outer.addWidget(self.path_bar)
 
+        # Inline toast banner (취소 / 안내 / 오류).
+        self._toast = QtWidgets.QFrame()
+        self._toast.setObjectName("Toast")
+        self._toast.setVisible(False)
+        toast_layout = QtWidgets.QHBoxLayout(self._toast)
+        toast_layout.setContentsMargins(14, 12, 14, 12)
+        toast_layout.setSpacing(12)
+        self._toast_title = QtWidgets.QLabel()
+        self._toast_body = QtWidgets.QLabel()
+        toast_text = QtWidgets.QVBoxLayout()
+        toast_text.setSpacing(2)
+        toast_text.addWidget(self._toast_title)
+        toast_text.addWidget(self._toast_body)
+        toast_layout.addLayout(toast_text, 1)
+        outer.addWidget(self._toast)
+
         options = Card()
         opt_row = QtWidgets.QHBoxLayout(options)
         opt_row.setContentsMargins(18, 14, 18, 14)
@@ -189,6 +205,40 @@ class OrganizeView(QtWidgets.QWidget):
             self.stage_ind.reset()
             self.progress_label.setText("시작 중…")
             self.log_view.clear()
+            self._set_toast(None)
+
+    def show_canceling(self):
+        self._set_toast(("warn", "취소 요청됨", "현재 단계가 안전하게 멈출 때까지 잠시만요…"))
+
+    def show_canceled(self):
+        self.set_running(False)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("취소되었습니다.")
+        self._set_toast(("info", "정리를 취소했습니다", "이미 옮긴 파일은 그대로 유지됩니다. 다시 시작할 수 있습니다."))
+
+    def _set_toast(self, payload):
+        """Inline toast banner.  payload = (kind, title, body) or None."""
+        if not hasattr(self, "_toast"):
+            return
+        if payload is None:
+            self._toast.setVisible(False)
+            return
+        kind, title, body = payload
+        palette = {
+            "warn":  ("#FFF4E5", "#C37200", "#FFE2B2"),
+            "info":  ("#EAF4FF", "#0B66C2", "#C7DEF8"),
+            "error": ("#FFECEC", "#B3261E", "#F4C7C5"),
+        }
+        bg, fg, border = palette.get(kind, palette["info"])
+        self._toast.setStyleSheet(
+            f"QFrame#Toast {{ background:{bg}; border:1px solid {border}; "
+            f"border-radius:12px; }}"
+        )
+        self._toast_title.setText(title)
+        self._toast_title.setStyleSheet(f"color:{fg};font-weight:700;font-size:14px;")
+        self._toast_body.setText(body)
+        self._toast_body.setStyleSheet(f"color:{fg};font-size:12px;")
+        self._toast.setVisible(True)
 
     def on_stage(self, stage: str, pct: float):
         self.stage_ind.set_active(stage)
@@ -255,7 +305,23 @@ class OrganizeView(QtWidgets.QWidget):
 
     def on_failed(self, msg: str):
         self.set_running(False)
-        QtWidgets.QMessageBox.critical(self, "오류", msg)
+        # Detect the user-cancel path and surface it gently rather than as
+        # a scary "Critical Error" modal.
+        low = (msg or "").lower()
+        if "cancel" in low or "취소" in (msg or ""):
+            self.show_canceled()
+            return
+        # Friendlier copy for common transport failures.
+        friendly = msg or ""
+        if "read timeout" in low or "timed out" in low:
+            friendly = "LLM 응답이 시간 안에 도착하지 못했어요. 잠시 후 다시 시도해 주세요."
+        elif "connectionerror" in low or "connection refused" in low:
+            friendly = "LLM 서버에 연결하지 못했어요. 엔드포인트 URL과 서버 상태를 확인해 주세요."
+        elif "invalid api key" in low or "unauthorized" in low or "401" in low:
+            friendly = "API 키가 인증되지 않았어요. 설정에서 키를 다시 확인해 주세요."
+        else:
+            friendly = f"문제가 발생했어요: {msg}"
+        self._set_toast(("error", "정리를 끝내지 못했어요", friendly))
 
     def _emit_rollback(self):
         if self._last_op and self._last_op.operation_id:

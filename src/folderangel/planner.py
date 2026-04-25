@@ -29,6 +29,26 @@ def _batched(items: list, size: int):
         yield items[i : i + size]
 
 
+def _strip_payload(files: list[dict]) -> list[dict]:
+    """Drop the heaviest fields so a small-context model has room.
+
+    Keeps path + name + ext + a *short* excerpt; drops mime / size /
+    accessed timestamps that don't help categorisation.
+    """
+    out = []
+    for f in files:
+        out.append(
+            {
+                "path": f.get("path"),
+                "name": f.get("name"),
+                "ext": f.get("ext", ""),
+                "modified": f.get("modified", ""),
+                "excerpt": (f.get("excerpt") or "")[:600],
+            }
+        )
+    return out
+
+
 def _unique_categories(cat_list: list[dict]) -> list[dict]:
     seen: dict[str, dict] = {}
     for c in cat_list:
@@ -60,16 +80,48 @@ class Planner:
         self.gemini = gemini
         self.cancel_check = cancel_check
 
-    def _llm_call(self, prompt: str, *, heartbeat=None) -> dict:
-        # Helper: every LLM call goes through here so we can attach the
-        # current cancel_check exactly once.  Tolerant of clients that
-        # don't yet support the keyword (legacy custom clients).
+    def _llm_call(
+        self,
+        prompt: str,
+        *,
+        heartbeat=None,
+        stream_label: str = "LLM 응답 스트림",
+        progress: Optional["ProgressCB"] = None,
+    ) -> dict:
+        """All LLM calls go through here so we can uniformly attach the
+        current cancel_check, the progress heartbeat, *and* a
+        token-streaming preview callback that surfaces what the model is
+        currently producing.
+
+        Tolerant of clients that don't yet support every keyword
+        (Gemini's REST client has no stream_text support — we fall back
+        to plain non-streaming behaviour for it).
+        """
+        stream_state = {"chars": 0, "preview": ""}
+
+        def _on_stream(chunk: str, total: int):
+            stream_state["chars"] = total
+            # Keep a rolling tail of the response so the user can see what
+            # the LLM is actively writing.
+            stream_state["preview"] = (stream_state["preview"] + chunk)[-160:]
+            if progress is not None:
+                tail = stream_state["preview"].replace("\n", " ").strip()
+                progress(f"{stream_label}: {total}자 — …{tail}", -1.0)
+
         try:
             return self.gemini.generate_json(
-                prompt, heartbeat=heartbeat, cancel_check=self.cancel_check
+                prompt,
+                heartbeat=heartbeat,
+                cancel_check=self.cancel_check,
+                stream_text=_on_stream,
             )
         except TypeError:
-            return self.gemini.generate_json(prompt, heartbeat=heartbeat)
+            try:
+                return self.gemini.generate_json(
+                    prompt, heartbeat=heartbeat, cancel_check=self.cancel_check
+                )
+            except TypeError:
+                return self.gemini.generate_json(prompt, heartbeat=heartbeat)
 
     def _check_cancel(self) -> None:
         if self.cancel_check is not None and self.cancel_check():
@@ -100,6 +152,28 @@ class Planner:
                 progress("mock-planner", 0.5)
             plan_dict = mock_planner.plan(payloads, self.config.ambiguity_threshold)
             return _plan_from_dict(plan_dict, entries)
+
+        # ------------------------------------------------------------------
+        # Local LLM (small-context) micro-batch path.  When the provider is
+        # an OpenAI-compat backend (Qwen / Llama on Ollama / LM Studio /
+        # vLLM ...), a single 100-file prompt usually overflows the
+        # context window, takes minutes, and times out.  Instead we:
+        #   Pass A  – split files into small chunks, ask each chunk for
+        #             *category candidates* only.  Each call is short.
+        #   Pass M  – one tiny merge call consolidates candidates into
+        #             the final folder list (with group + time_label).
+        #   Pass B  – per-chunk assignment using the final categories.
+        # Total inference count is bounded by 2 × ceil(N / chunk) + 1,
+        # but every single call fits comfortably in 4–8k context.
+        if self._should_use_microbatch():
+            try:
+                if progress:
+                    progress("plan: micro-batch 모드 (로컬 LLM)…", 0.2)
+                plan_dict = self._microbatch_plan(payloads, progress)
+                return _plan_from_dict(plan_dict, entries)
+            except Exception as exc:
+                log.warning("micro-batch plan failed; falling back: %s", exc)
+                # Fall through to economy or the legacy two-stage path.
 
         # ------------------------------------------------------------------
         # Economy mode: a single LLM call covers categorisation + assignment.
@@ -133,6 +207,8 @@ class Planner:
                     heartbeat=self._heartbeat_for(
                         f"stage-a [{idx}/{len(batches)}] LLM 응답 대기", progress
                     ),
+                    stream_label=f"stage-a [{idx}/{len(batches)}] 토큰 수신",
+                    progress=progress,
                 )
                 cands = resp.get("candidates") or []
                 if not isinstance(cands, list):
@@ -155,6 +231,8 @@ class Planner:
             merged = self._llm_call(
                 merge_prompt,
                 heartbeat=self._heartbeat_for("stage-merge: LLM 응답 대기", progress),
+                stream_label="stage-merge 토큰 수신",
+                progress=progress,
             )
             categories_raw = merged.get("categories") or []
             if not categories_raw:
@@ -199,6 +277,155 @@ class Planner:
 
 
     # ------------------------------------------------------------------
+    def _should_use_microbatch(self) -> bool:
+        mode = (getattr(self.config, "local_microbatch_mode", "auto") or "auto").lower()
+        if mode == "on":
+            return True
+        if mode == "off":
+            return False
+        # auto: enable for OpenAI-compat (typically a local model with a
+        # small context) and disable for Gemini (huge context, fast).
+        return (getattr(self.config, "llm_provider", "gemini") or "gemini").lower() in (
+            "openai_compat",
+            "openai",
+            "compat",
+        )
+
+    def _microbatch_plan(
+        self, payloads: list[dict], progress: Optional[ProgressCB]
+    ) -> dict:
+        """Three-pass plan that fits in small (4–8k) local-LLM contexts."""
+        chunk = max(4, int(getattr(self.config, "local_chunk_size", 12)))
+        chunks = list(_batched(payloads, chunk))
+
+        # ---- Pass A: per-chunk candidate discovery -----------------
+        candidate_sets: list[list[dict]] = []
+        for idx, batch in enumerate(chunks, 1):
+            self._check_cancel()
+            if progress:
+                progress(
+                    f"micro-batch A [{idx}/{len(chunks)}] 후보 추출 ({len(batch)} 파일)…",
+                    0.2 + (idx - 1) / max(1, len(chunks)) * 0.35,
+                )
+            prompt = prompts.build_compact_discover(_strip_payload(batch))
+            try:
+                resp = self._llm_call(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"micro-batch A [{idx}/{len(chunks)}] 응답 대기", progress
+                    ),
+                    stream_label=f"micro-batch A [{idx}/{len(chunks)}] 토큰",
+                    progress=progress,
+                )
+            except LLMError:
+                # If even a small chunk fails, halve it and retry.
+                if len(batch) <= 1:
+                    raise
+                mid = len(batch) // 2
+                candidate_sets.extend(
+                    self._microbatch_discover_split(batch[:mid], progress)
+                )
+                candidate_sets.extend(
+                    self._microbatch_discover_split(batch[mid:], progress)
+                )
+                continue
+            cands = resp.get("candidates") or []
+            if isinstance(cands, list):
+                candidate_sets.append(cands)
+            else:
+                candidate_sets.append([])
+
+        # ---- Pass M: merge candidates into final categories --------
+        self._check_cancel()
+        if progress:
+            progress("micro-batch M: 후보 통합 중…", 0.55)
+        merge_prompt = prompts.build_compact_merge(
+            candidate_sets,
+            self.config.min_categories,
+            self.config.max_categories,
+        )
+        merged = self._llm_call(
+            merge_prompt,
+            heartbeat=self._heartbeat_for("micro-batch M 응답 대기", progress),
+            stream_label="micro-batch M 토큰",
+            progress=progress,
+        )
+        categories_raw = merged.get("categories") or []
+        categories_raw = _unique_categories(categories_raw)[: self.config.max_categories]
+        if not categories_raw:
+            # very last fallback — flatten the candidate list ourselves
+            flat = [c for cs in candidate_sets for c in cs]
+            categories_raw = _unique_categories(flat)[: self.config.max_categories]
+        if not categories_raw:
+            raise LLMError("micro-batch produced no categories")
+
+        # ---- Pass B: per-chunk assignment using the final categories
+        category_ids = {c["id"] for c in categories_raw}
+        assignments_raw: list[dict] = []
+        for idx, batch in enumerate(chunks, 1):
+            self._check_cancel()
+            if progress:
+                progress(
+                    f"micro-batch B [{idx}/{len(chunks)}] 분류 ({len(batch)} 파일)…",
+                    0.6 + (idx / max(1, len(chunks))) * 0.35,
+                )
+            prompt = prompts.build_compact_assign(
+                _strip_payload(batch),
+                categories_raw,
+                self.config.ambiguity_threshold,
+            )
+            try:
+                resp = self._llm_call(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"micro-batch B [{idx}/{len(chunks)}] 응답 대기", progress
+                    ),
+                    stream_label=f"micro-batch B [{idx}/{len(chunks)}] 토큰",
+                    progress=progress,
+                )
+                assigns = resp.get("assignments") or []
+                if not isinstance(assigns, list):
+                    raise LLMError("assignments not a list")
+                # Coerce unknown ids to misc/closest.
+                for a in assigns:
+                    if a.get("primary") not in category_ids:
+                        a["primary"] = _closest_category(a.get("primary", ""), categories_raw)
+                assignments_raw.extend(assigns)
+            except LLMError as exc:
+                log.warning("micro-batch B chunk %d → mock: %s", idx, exc)
+                m = mock_planner.plan(batch, self.config.ambiguity_threshold)
+                for a in m["assignments"]:
+                    if a["primary"] not in category_ids:
+                        a["primary"] = _closest_category(a["primary"], categories_raw)
+                assignments_raw.extend(m["assignments"])
+        return {"categories": categories_raw, "assignments": assignments_raw}
+
+    def _microbatch_discover_split(
+        self, batch: list[dict], progress: Optional[ProgressCB]
+    ) -> list[list[dict]]:
+        """Split-and-retry helper for Pass A when a chunk is still too big."""
+        if not batch:
+            return []
+        prompt = prompts.build_compact_discover(_strip_payload(batch))
+        try:
+            resp = self._llm_call(
+                prompt,
+                heartbeat=self._heartbeat_for("micro-batch A (분할) 응답 대기", progress),
+                stream_label="micro-batch A (분할) 토큰",
+                progress=progress,
+            )
+            cands = resp.get("candidates") or []
+            return [cands if isinstance(cands, list) else []]
+        except LLMError:
+            if len(batch) <= 1:
+                return [[]]
+            mid = len(batch) // 2
+            return (
+                self._microbatch_discover_split(batch[:mid], progress)
+                + self._microbatch_discover_split(batch[mid:], progress)
+            )
+
+    # ------------------------------------------------------------------
     def _heartbeat_for(self, label: str, progress: Optional[ProgressCB]):
         """Build a heartbeat callback that streams ``label … Ns`` lines."""
         if progress is None:
@@ -239,6 +466,8 @@ class Planner:
                 heartbeat=self._heartbeat_for(
                     f"plan: LLM 응답 대기 중 ({len(payloads)} 파일)", progress
                 ),
+                stream_label=f"plan 토큰 수신 ({len(payloads)} 파일)",
+                progress=progress,
             )
             cats = resp.get("categories") or []
             assigns = resp.get("assignments") or []
@@ -269,6 +498,8 @@ class Planner:
         design = self._llm_call(
             design_prompt,
             heartbeat=self._heartbeat_for("plan-design: LLM 응답 대기", progress),
+            stream_label="plan-design 토큰 수신",
+            progress=progress,
         )
         categories = design.get("categories") or []
         if not categories:
@@ -319,6 +550,8 @@ class Planner:
                 heartbeat=self._heartbeat_for(
                     f"stage-b: LLM 응답 대기 ({len(batch)} 파일)", progress
                 ),
+                stream_label=f"stage-b 토큰 수신 ({len(batch)} 파일)",
+                progress=progress,
             )
         except LLMError as exc:
             if len(batch) <= 1:

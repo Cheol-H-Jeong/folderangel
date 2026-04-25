@@ -261,6 +261,7 @@ class OpenAICompatClient:
         temperature: float = 0.2,
         heartbeat: Optional[Callable[[float], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        stream_text: Optional[Callable[[str, int], None]] = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         headers = {
@@ -308,6 +309,38 @@ class OpenAICompatClient:
                 beat_thread = threading.Thread(target=_beat, daemon=True)
                 beat_thread.start()
             resp = None
+            cancel_watcher_stop = threading.Event()
+
+            def _watch_cancel():
+                # Aggressively close the live response as soon as the
+                # user cancels so the call returns within ~50 ms instead
+                # of waiting for the next SSE chunk.
+                while not cancel_watcher_stop.is_set():
+                    if cancel_check is not None and cancel_check():
+                        try:
+                            if resp is not None:
+                                resp.close()
+                        except Exception:
+                            pass
+                        try:
+                            # Also yank the underlying socket for good measure.
+                            if resp is not None and hasattr(resp, "raw"):
+                                raw = resp.raw
+                                if raw is not None:
+                                    try:
+                                        raw.close()
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                        return
+                    if cancel_watcher_stop.wait(0.05):
+                        return
+
+            cancel_thread = None
+            if cancel_check is not None:
+                cancel_thread = threading.Thread(target=_watch_cancel, daemon=True)
+                cancel_thread.start()
             try:
                 resp = requests.post(
                     url,
@@ -343,7 +376,7 @@ class OpenAICompatClient:
                         f"openai-compat http {resp.status_code}: {text_preview}"
                     )
                 if body.get("stream"):
-                    text = _consume_openai_stream(resp, cancel_check)
+                    text = _consume_openai_stream(resp, cancel_check, stream_text)
                 else:
                     data = resp.json()
                     text = _extract_openai_text(data)
@@ -371,26 +404,41 @@ class OpenAICompatClient:
                 continue
             finally:
                 stop_evt.set()
+                cancel_watcher_stop.set()
                 if beat_thread is not None:
                     beat_thread.join(timeout=0.1)
+                if cancel_thread is not None:
+                    cancel_thread.join(timeout=0.1)
                 if resp is not None:
                     try:
                         resp.close()
                     except Exception:
                         pass
+            # If we got here via a user cancel, raise immediately.
+            if cancel_check is not None and cancel_check():
+                raise LLMError("canceled by user")
         raise LLMError(f"openai-compat failed after retries: {last_exc}")
 
 
 def _consume_openai_stream(
-    resp: "requests.Response", cancel_check: Optional[Callable[[], bool]]
+    resp: "requests.Response",
+    cancel_check: Optional[Callable[[], bool]],
+    stream_text: Optional[Callable[[str, int], None]] = None,
 ) -> str:
     """Read an OpenAI SSE stream and return the joined text content.
 
     Each line is ``data: { "choices": [...] }``.  We stop on the special
     ``data: [DONE]`` marker, on ``finish_reason`` non-null, on user
     cancel, or on connection close.
+
+    When ``stream_text`` is given it is called with
+    ``(latest_chunk, total_chars_so_far)`` for every text delta — the UI
+    layer uses this to display the partial response live so the user
+    sees that the model is actively generating.
     """
     out: list[str] = []
+    last_emit = 0.0
+    total = 0
     for raw_line in resp.iter_lines(decode_unicode=True):
         if cancel_check is not None and cancel_check():
             try:
@@ -416,13 +464,32 @@ def _consume_openai_stream(
             continue
         delta = choice.get("delta") or {}
         chunk = delta.get("content")
+        chunk_text = ""
         if isinstance(chunk, list):
             for part in chunk:
                 if isinstance(part, dict):
-                    out.append(part.get("text", ""))
+                    chunk_text += part.get("text", "")
         elif isinstance(chunk, str):
-            out.append(chunk)
+            chunk_text = chunk
+        if chunk_text:
+            out.append(chunk_text)
+            total += len(chunk_text)
+            if stream_text is not None:
+                # Throttle UI updates to ~5 Hz so the log doesn't churn.
+                now = time.monotonic()
+                if now - last_emit > 0.2:
+                    try:
+                        stream_text(chunk_text, total)
+                    except Exception:
+                        pass
+                    last_emit = now
         if choice.get("finish_reason"):
+            # Final flush so the user sees the complete count.
+            if stream_text is not None and chunk_text:
+                try:
+                    stream_text("", total)
+                except Exception:
+                    pass
             break
     return "".join(out)
 
