@@ -9,13 +9,15 @@ before committing — walk this checklist and explicitly verify each
 applicable item.  Do not skip silently.  When a rule does not apply to
 the current change, say so.  Treat unverified items as defects.
 
-**Self-update loop (permanent rule):** Every time the user points out a
-defect in any project I work on, I (1) fix it, (2) abstract the lesson
-into a project-agnostic rule, (3) append or sharpen the relevant item
-in this manual *before* closing the conversation, (4) commit/push the
-manual update along with the fix, (5) note in the response which item
-was added.  No user-reported bug is allowed to leave only a one-off
-fix behind — every one becomes a permanent guard.
+**Self-update loop (permanent rule, buffered):** During a session,
+user-reported defects are fixed in code as usual but the lesson is
+*not* written into this manual immediately.  Instead a one-line draft
+is appended to `~/.claude/SELF_REVIEW_PENDING.md` (timestamp,
+project, symptom, draft rule).  At context-compaction time, the
+pending entries are deduped/merged and applied to this canonical
+manual in a single batched edit + commit.  Between compactions this
+manual is read-only.  This avoids forcing the user to approve a
+manual edit on every bug fix.
 
 ---
 
