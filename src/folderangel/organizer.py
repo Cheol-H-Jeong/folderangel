@@ -204,6 +204,24 @@ def _set_dir_mtime(path: Path, dt: datetime) -> None:
         log.debug("set mtime failed for %s: %s", path, exc)
 
 
+def _safe_mtime(path: Path) -> Optional[float]:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _median(values: list[float]) -> float:
+    values = sorted(values)
+    n = len(values)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 1:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2.0
+
+
 def _walk_dirs(root: Path):
     for entry in os.scandir(root):
         if entry.is_dir(follow_symlinks=False):
@@ -391,16 +409,37 @@ class Organizer:
         # Report only the categories that ended up hosting at least one file.
         surviving_categories = [c for c in plan.categories if c.id in used_category_ids]
 
-        # Stamp folder mtimes from the LLM-provided time_label so file
-        # managers can sort folders chronologically.
+        # Stamp folder mtimes from the *median modified time* of the files
+        # actually inside the folder.  This is more honest than the LLM's
+        # time_label heuristic — when the LLM mis-tags a category's
+        # period (e.g. "2024" for files that are actually 2025-01) the
+        # mtime would mislead the user's file manager.  The label is
+        # still kept in the folder *name* so the user sees both signals.
         if not dry_run:
             if progress:
-                progress("organize: 폴더 시기(mtime) 적용", 0.97)
+                progress("organize: 폴더 수정시각 적용 (median)", 0.97)
+            files_per_cat: dict[str, list[float]] = {}
+            for mf in moved:
+                ts = _safe_mtime(mf.new_path)
+                if ts is not None:
+                    files_per_cat.setdefault(mf.category_id, []).append(ts)
             for cat in surviving_categories:
-                dt = _parse_time_label(cat.time_label)
                 d = dir_for.get(cat.id)
-                if dt is not None and d is not None and d.is_dir():
-                    _set_dir_mtime(d, dt)
+                if d is None or not d.is_dir():
+                    continue
+                stamps = files_per_cat.get(cat.id) or []
+                if stamps:
+                    median_ts = _median(stamps)
+                    try:
+                        os.utime(d, (median_ts, median_ts))
+                    except OSError as exc:
+                        log.debug("set mtime failed for %s: %s", d, exc)
+                else:
+                    # No moved files — fall back to time_label parsing
+                    # so an empty bucket still gets a sensible mtime.
+                    dt = _parse_time_label(cat.time_label)
+                    if dt is not None:
+                        _set_dir_mtime(d, dt)
 
             # Final pass: any sibling folder under the target root that
             # still lacks a "{n}." prefix gets renamed to ``"9. <name>"`` so
@@ -449,6 +488,8 @@ class Organizer:
         For unnumbered folders we prepend ``"9. "`` (the catch-all bucket)
         and dedupe via the same ``(N)`` suffix scheme used for moves.
         """
+        from .llm.client import _looks_like_mojibake
+
         try:
             entries = list(os.scandir(root))
         except FileNotFoundError:
@@ -457,6 +498,21 @@ class Organizer:
             if not entry.is_dir(follow_symlinks=False):
                 continue
             current = Path(entry.path)
+
+            # Stripping any "{N}." prefix first so the inspection looks at
+            # the actual descriptive part of the folder name.
+            display_core = _GROUP_PREFIX_RE.sub("", current.name)
+
+            # Recover any pre-existing mojibake folder name.  These were
+            # created by a prior run (or another tool) on a system where
+            # UTF-8 was decoded as Latin-1 — leaving e.g.
+            # "6. ì ì¡° AI ì¤ì¦ ì§ì (2024)" on disk.  We do NOT trust the
+            # name; we either delete the folder if it's empty or rename
+            # it to a generic "정리되지 않은 폴더 N" so the user can revisit.
+            if _looks_like_mojibake(display_core, strict=True):
+                self._handle_mojibake_dir(root, current)
+                continue
+
             if has_group_prefix(current.name):
                 continue
             new_name = sanitize_folder_name(f"9. {current.name}")
@@ -469,6 +525,35 @@ class Organizer:
                 current.rename(target)
             except OSError as exc:
                 log.warning("renumber rename failed %s → %s: %s", current, target, exc)
+
+    def _handle_mojibake_dir(self, root: Path, current: Path) -> None:
+        """Quarantine a pre-existing mojibake folder name."""
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            children = []
+
+        if not children:
+            try:
+                current.rmdir()
+                log.info("removed empty mojibake folder: %s", current)
+            except OSError as exc:
+                log.warning("could not remove %s: %s", current, exc)
+            return
+
+        # Non-empty: rename to a safe generic so the user can sort it out
+        # without the OS file manager garbling the path.
+        base = "9. 정리되지 않은 폴더"
+        target = root / base
+        counter = 2
+        while target.exists() and target != current:
+            target = root / f"{base} ({counter})"
+            counter += 1
+        try:
+            current.rename(target)
+            log.info("renamed mojibake folder %s → %s", current, target)
+        except OSError as exc:
+            log.warning("could not rename mojibake folder %s: %s", current, exc)
 
     # -----------------------------------------------------------------
     def _sweep_empty_dirs(self, root: Path) -> None:

@@ -58,6 +58,81 @@ def test_user_reported_latin1_mojibake_folder_name_is_rejected():
     assert out == "folder", f"mojibake leaked through sanitiser: {out!r}"
 
 
+def test_organizer_quarantines_preexisting_mojibake_folder(tmp_path):
+    """User-reported case: a mojibake-named folder remained on disk
+    after a previous run.  The next run must either delete it (empty)
+    or rename it to a generic safe name (non-empty)."""
+    from datetime import datetime
+    from folderangel.config import Config
+    from folderangel.models import Plan
+    from folderangel.organizer import Organizer
+
+    bad_empty = tmp_path / "6. ì ì¡° AI ì¤ì¦ ì§ì (2024)"
+    bad_empty.mkdir()
+    bad_kept = tmp_path / "7. ëª¨ì§ ë°ì½ë"
+    bad_kept.mkdir()
+    (bad_kept / "leftover.txt").write_text("x")
+
+    Organizer(Config()).execute(tmp_path, Plan(categories=[], assignments=[]))
+
+    # Empty mojibake folder gone
+    assert not bad_empty.exists()
+    # Non-empty mojibake folder renamed to a safe generic
+    assert not bad_kept.exists()
+    safe = list(tmp_path.glob("9. 정리되지 않은 폴더*"))
+    assert safe, f"expected quarantined folder, got: {list(tmp_path.iterdir())}"
+    assert (safe[0] / "leftover.txt").exists()
+
+
+def test_organizer_uses_median_mtime_of_files(tmp_path):
+    """Folder mtime must equal the median modified-time of the moved
+    files inside it, not the LLM's time_label heuristic."""
+    import os
+    from datetime import datetime, timezone
+    from folderangel.config import Config
+    from folderangel.models import Assignment, Category, Plan
+    from folderangel.organizer import Organizer
+
+    # Three source files with known mtimes spread across years.
+    targets = []
+    epochs = [
+        datetime(2023, 1, 15, tzinfo=timezone.utc).timestamp(),
+        datetime(2024, 6, 15, tzinfo=timezone.utc).timestamp(),  # median
+        datetime(2025, 9, 15, tzinfo=timezone.utc).timestamp(),
+    ]
+    for i, ts in enumerate(epochs):
+        f = tmp_path / f"f{i}.md"
+        f.write_text("x")
+        os.utime(f, (ts, ts))
+        targets.append(f)
+
+    cats = [Category(id="proj", name="Alpha", group=1, time_label="2099")]
+    assigns = [
+        Assignment(file_path=t, primary_category_id="proj", primary_score=0.9)
+        for t in targets
+    ]
+    Organizer(Config()).execute(tmp_path, Plan(cats, assigns))
+
+    folder = next(p for p in tmp_path.iterdir() if p.is_dir() and "Alpha" in p.name)
+    folder_mtime = folder.stat().st_mtime
+    median_ts = epochs[1]
+    # Allow a 2-day slop because filesystems may round mtimes.
+    assert abs(folder_mtime - median_ts) < 2 * 86400, (
+        f"folder mtime {folder_mtime} not near median {median_ts}"
+    )
+
+
+def test_safe_path_repr_redacts_mojibake_parents():
+    from folderangel.llm.client import _looks_like_mojibake
+    from folderangel.planner import _safe_path_repr
+
+    bad = "/work/6. ì ì¡° AI ì¤ì¦ ì§ì (2024)/제안서_v1.pdf"
+    out = _safe_path_repr(bad, _looks_like_mojibake)
+    assert "ì¡°" not in out
+    assert "[unknown-folder]" in out
+    assert "제안서_v1.pdf" in out
+
+
 def test_planner_drops_mojibake_category_in_otherwise_clean_response():
     """The leak path: only one of several category names is mojibake."""
     from pathlib import Path

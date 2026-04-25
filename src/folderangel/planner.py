@@ -12,6 +12,7 @@ plan.  That fallback is the reason we don't hard-fail the user on API errors.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -27,6 +28,32 @@ ProgressCB = Callable[[str, float], None]
 def _batched(items: list, size: int):
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _safe_path_repr(path_str: str, is_mojibake) -> str:
+    """Redact pre-existing mojibake folder names from a path before we
+    show it to the LLM.
+
+    Keeps the leaf filename intact, replaces any parent path component
+    that looks like Latin-1-of-UTF-8 garbage with a neutral placeholder
+    so the model has no incentive to reuse the broken name.  Also
+    strips any leading "{n}." prefix from prior runs.
+    """
+    if not path_str:
+        return path_str
+    p = Path(path_str)
+    if not p.parts:
+        return path_str
+    redacted: list[str] = []
+    for part in p.parts:
+        # Drop a leading "{n}." prefix from parent dirs so the model
+        # sees the descriptive part only.
+        core = re.sub(r"^\s*\d\.\s+", "", part)
+        if is_mojibake(core, strict=True):
+            redacted.append("[unknown-folder]")
+        else:
+            redacted.append(part)
+    return str(Path(*redacted))
 
 
 def _strip_payload(files: list[dict]) -> list[dict]:
@@ -152,12 +179,20 @@ class Planner:
 
         # Build LLM payloads, capping the per-file excerpt so a single
         # giant slide deck cannot blow the request size or read timeout.
+        # Also: scrub any mojibake that already exists in the file's
+        # *parent directory names* (left over from prior runs on this
+        # corpus).  The LLM should ignore those broken folder names and
+        # rebuild the folder structure from the file metadata + content
+        # only — see ``_safe_path_repr`` for the redaction logic.
+        from .llm.client import _looks_like_mojibake
+
         per_file_cap = min(self.config.max_excerpt_chars, 1200)
         payloads = []
         for e in entries:
             d = e.to_summary_dict()
             excerpt = d.get("excerpt", "") or ""
             d["excerpt"] = excerpt[:per_file_cap]
+            d["path"] = _safe_path_repr(d.get("path") or "", _looks_like_mojibake)
             payloads.append(d)
 
         # Short-circuit if there's no Gemini client — everything is mock.

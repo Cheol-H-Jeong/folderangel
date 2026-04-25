@@ -143,6 +143,22 @@ just the unit tests.
   Some Linux file managers don't.  Use `.desktop` `Type=Link` URI
   (preferred) or `Type=Application` with `gio open`/`xdg-open`; on
   Windows use `.lnk` via pywin32 or PowerShell, with `.url` fallback.
+- **D6. Never blindly inherit pre-existing names / paths from the
+  filesystem.**  When ingesting an environment a user has been
+  curating, names from previous runs (or other tools) may be corrupt
+  (mojibake, garbled UTF-8, half-renamed).  Detect those at ingest
+  time and (a) redact them from any *prompt or input* sent to a model
+  or solver — the rebuild should rely on file-content / metadata only,
+  not on the broken parent-folder name — and (b) at write-time
+  quarantine them: empty → delete, non-empty → rename to a safe
+  generic ("정리되지 않은 폴더 / unsorted") so the user can review.
+- **D7. Time / date fields on aggregate objects (folders, albums,
+  groups) must be derived from the *actual member data* — typically
+  the median or max of the children's timestamps — not from a
+  language-model hint.  An LLM-supplied label like "2024-Q1" can be
+  wrong; child file mtimes are ground truth.  Keep the label in the
+  *display name* if you want, but use real data for sortable
+  metadata fields (mtime, ctime, sort-key).
 
 ## E. Diagnostics & evidence-based fixes
 
