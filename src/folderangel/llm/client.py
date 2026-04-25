@@ -230,6 +230,13 @@ def _extract_text(response: dict) -> str:
 
 def _strip_code_fence(text: str) -> str:
     t = text.strip()
+    # Qwen3 / DeepSeek-R1 style models often leak a leading <think>…</think>
+    # block (or just a trailing "</think>") even when reasoning is disabled.
+    # Drop everything up to and including the closing think tag.
+    low = t.lower()
+    if "</think>" in low:
+        idx = low.rfind("</think>")
+        t = t[idx + len("</think>"):].lstrip()
     if t.startswith("```"):
         # Remove first fence line and optional language tag
         lines = t.splitlines()
@@ -311,6 +318,18 @@ class OpenAICompatClient:
         }
         if self.stream:
             body["stream"] = True
+        # Qwen3 / GPT-OSS-style thinking models burn hundreds of "reasoning"
+        # tokens before the actual answer.  For our task (returning a JSON
+        # plan) the extra reasoning is wasted compute.  We disable it via
+        # every knob the major backends recognise; servers that don't know
+        # the field simply ignore it.
+        model_lc = (self.model or "").lower()
+        if any(tag in model_lc for tag in ("qwen3", "qwen-3", "deepseek-r1", "magistral", "phi-4-mini-reasoning")):
+            body.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+            # llama.cpp also accepts a `/no_think` prefix on the user turn.
+            if body["messages"] and isinstance(body["messages"][-1].get("content"), str):
+                if not body["messages"][-1]["content"].lstrip().startswith("/no_think"):
+                    body["messages"][-1]["content"] = "/no_think " + body["messages"][-1]["content"]
 
         self.prompt_chars += len(prompt)
         attempt = 0
@@ -435,8 +454,9 @@ class OpenAICompatClient:
                     "prompt=%d chars, response=%d chars (~%.1f tok/s)",
                     duration, ttft, len(prompt), len(text), tps,
                 )
+                cleaned = _strip_code_fence(text)
                 try:
-                    return json.loads(text)
+                    return json.loads(cleaned)
                 except json.JSONDecodeError:
                     return json.loads(_strip_code_fence(text))
             except (requests.RequestException, LLMError, json.JSONDecodeError) as exc:
