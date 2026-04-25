@@ -422,6 +422,13 @@ class OpenAICompatClient:
                     timeout=(15.0, current_timeout),
                     stream=bool(body.get("stream")),
                 )
+                # Force UTF-8 decoding regardless of what the server
+                # advertises.  llama.cpp / Ollama / vLLM all return UTF-8
+                # JSON, but ``requests`` falls back to Latin-1 when the
+                # ``Content-Type`` header omits charset — that turns
+                # Korean (multi-byte UTF-8) into mojibake like ``ì¤`` (the
+                # bytes 0xEC 0xA4 0x91 of "중" decoded as Latin-1).
+                resp.encoding = "utf-8"
                 if resp.status_code >= 400:
                     text_preview = ""
                     try:
@@ -506,6 +513,19 @@ class OpenAICompatClient:
                     "prompt=%d chars, response=%d chars (~%.1f tok/s)",
                     duration, ttft, len(prompt), len(text), tps,
                 )
+                # Repair Latin-1 ↔ UTF-8 mojibake if it happened upstream.
+                text = _try_repair_mojibake(text)
+                # If the response is *still* full of mojibake, the model
+                # itself produced garbage (e.g. a Q-quant template
+                # mismatch).  Fail loudly instead of writing nonsense to
+                # disk.
+                if _looks_like_mojibake(text):
+                    raise LLMError(
+                        "model output appears to be mojibake (likely an "
+                        "encoding or chat-template mismatch in the local "
+                        "server).  Try a different quant or check the "
+                        "server's chat template."
+                    )
                 cleaned = _strip_code_fence(text)
                 try:
                     return json.loads(cleaned)
@@ -581,15 +601,24 @@ def _consume_openai_stream(
     out: list[str] = []
     last_emit = 0.0
     total = 0
-    for raw_line in resp.iter_lines(decode_unicode=True):
+    # Use bytes mode so we control the decoding — never trust the server's
+    # advertised charset (often missing or wrong for self-hosted backends).
+    for raw_bytes in resp.iter_lines(decode_unicode=False):
         if cancel_check is not None and cancel_check():
             try:
                 resp.close()
             except Exception:
                 pass
             raise LLMError("canceled by user")
-        if not raw_line:
+        if not raw_bytes:
             continue
+        try:
+            raw_line = raw_bytes.decode("utf-8")
+        except (AttributeError, UnicodeDecodeError):
+            try:
+                raw_line = raw_bytes.decode("utf-8", errors="replace") if isinstance(raw_bytes, (bytes, bytearray)) else str(raw_bytes)
+            except Exception:
+                continue
         line = raw_line.strip()
         if not line.startswith("data:"):
             continue
@@ -638,6 +667,40 @@ def _consume_openai_stream(
                     pass
             break
     return "".join(out)
+
+
+_MOJIBAKE_HINTS = ("ì", "ë", "Ã", "â\x80", "â\x82", "ï¿½")
+
+
+def _looks_like_mojibake(text: str) -> bool:
+    """Heuristic: did UTF-8 get decoded as Latin-1 somewhere upstream?
+
+    We look for the canonical telltale chars (``ì`` / ``ë`` / ``Ã``) and
+    require enough of them to dwarf the legitimate non-ASCII content.
+    """
+    if not text:
+        return False
+    hits = sum(text.count(t) for t in _MOJIBAKE_HINTS)
+    if hits < 3:
+        return False
+    # If a meaningful fraction of the text is mojibake markers we treat the
+    # whole thing as broken.
+    return hits >= max(3, len(text) * 0.01)
+
+
+def _try_repair_mojibake(text: str) -> str:
+    """Best-effort: re-encode as Latin-1, decode as UTF-8.  No-op on failure."""
+    if not _looks_like_mojibake(text):
+        return text
+    try:
+        repaired = text.encode("latin-1", errors="strict").decode("utf-8", errors="strict")
+        # Only accept the repair if it actually reduced the mojibake load.
+        if not _looks_like_mojibake(repaired):
+            log.info("repaired latin-1/UTF-8 mojibake in LLM response")
+            return repaired
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return text
 
 
 def _recover_truncated_json(text: str) -> str:

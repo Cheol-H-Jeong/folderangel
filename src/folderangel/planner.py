@@ -97,16 +97,30 @@ class Planner:
         (Gemini's REST client has no stream_text support — we fall back
         to plain non-streaming behaviour for it).
         """
-        stream_state = {"chars": 0, "preview": ""}
+        stream_state = {"chars": 0, "preview": "", "warned": False}
 
         def _on_stream(chunk: str, total: int):
             stream_state["chars"] = total
-            # Keep a rolling tail of the response so the user can see what
-            # the LLM is actively writing.
-            stream_state["preview"] = (stream_state["preview"] + chunk)[-160:]
+            # Don't show raw token previews in the live progress log —
+            # multi-byte boundaries split mid-character, JSON escapes look
+            # like garbage out of context, and even a clean stream looks
+            # noisy.  Just show progress count + the active stage label so
+            # the user knows it's still moving.
             if progress is not None:
-                tail = stream_state["preview"].replace("\n", " ").strip()
-                progress(f"{stream_label}: {total}자 — …{tail}", -1.0)
+                progress(f"{stream_label}: {total}자 수신 중…", -1.0)
+                if not stream_state["warned"]:
+                    from .llm.client import _looks_like_mojibake
+
+                    # Only sample the *cumulative* preview to detect
+                    # mojibake — never display it.
+                    stream_state["preview"] = (stream_state["preview"] + chunk)[-512:]
+                    if _looks_like_mojibake(stream_state["preview"]):
+                        stream_state["warned"] = True
+                        progress(
+                            "⚠ 응답이 모지바케로 보입니다 — "
+                            "서버 chat template 또는 양자화 모델 호환 문제일 수 있습니다.",
+                            -1.0,
+                        )
 
         try:
             return self.gemini.generate_json(
