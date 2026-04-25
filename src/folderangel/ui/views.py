@@ -648,68 +648,25 @@ class SettingsView(QtWidgets.QWidget):
         v.addWidget(conn_card)
 
         # ────────────────────────────────────────────────────────────
-        # Card 2 — 분류 동작 (provider-agnostic)
+        # Card 2 — 고급 옵션 (대부분 자동, 사용자가 만지지 않아도 됨)
         # ────────────────────────────────────────────────────────────
-        beh_card = Card()
-        c2 = QtWidgets.QVBoxLayout(beh_card)
+        adv_card = Card()
+        c2 = QtWidgets.QVBoxLayout(adv_card)
         c2.setContentsMargins(18, 16, 18, 16)
         c2.setSpacing(12)
-        c2_title = QtWidgets.QLabel("분류 동작")
+        c2_title = QtWidgets.QLabel("고급 (선택사항)")
         c2_title.setStyleSheet("font-size:16px;font-weight:600;")
         c2.addWidget(c2_title)
-
-        f2 = QtWidgets.QFormLayout()
-        f2.setSpacing(10)
-
-        self.spin_batch = QtWidgets.QSpinBox()
-        self.spin_batch.setRange(5, 100)
-        self.spin_batch.setValue(self.config.batch_size)
-        f2.addRow("배치 크기", self.spin_batch)
-
-        self.spin_amb = QtWidgets.QDoubleSpinBox()
-        self.spin_amb.setRange(0.0, 0.9)
-        self.spin_amb.setSingleStep(0.05)
-        self.spin_amb.setValue(self.config.ambiguity_threshold)
-        f2.addRow("모호 임계값", self.spin_amb)
-
-        self.spin_excerpt = QtWidgets.QSpinBox()
-        self.spin_excerpt.setRange(400, 6000)
-        self.spin_excerpt.setSingleStep(100)
-        self.spin_excerpt.setValue(self.config.max_excerpt_chars)
-        f2.addRow("본문 최대 글자", self.spin_excerpt)
-
-        c2.addLayout(f2)
-        v.addWidget(beh_card)
-
-        # ────────────────────────────────────────────────────────────
-        # Card 3 — LLM 호출 동작.  Some controls only make sense for
-        # OpenAI-compat / local backends; we hide them when Gemini is
-        # active so the page stays clean.
-        # ────────────────────────────────────────────────────────────
-        call_card = Card()
-        c3 = QtWidgets.QVBoxLayout(call_card)
-        c3.setContentsMargins(18, 16, 18, 16)
-        c3.setSpacing(12)
-        c3_title = QtWidgets.QLabel("LLM 호출 동작")
-        c3_title.setStyleSheet("font-size:16px;font-weight:600;")
-        c3.addWidget(c3_title)
+        c2_sub = QtWidgets.QLabel(
+            "배치 크기 · 모호 임계값 · 컨텍스트 분할 같은 항목은 모델 컨텍스트 한도와 "
+            "파일 수에 맞춰 자동으로 결정됩니다. 아래는 정말 필요한 사람만 바꾸세요."
+        )
+        c2_sub.setWordWrap(True)
+        c2_sub.setStyleSheet("color:#6e6e73;font-size:12px;")
+        c2.addWidget(c2_sub)
 
         f3 = QtWidgets.QFormLayout()
         f3.setSpacing(10)
-
-        self.chk_economy = QtWidgets.QCheckBox("LLM 호출 최소화 (Economy 모드)")
-        self.chk_economy.setChecked(self.config.economy_mode)
-        self.chk_economy.setToolTip(
-            "한 번의 호출로 폴더 설계와 분류를 동시에 수행합니다.\n"
-            "프로젝트명 인식이 좋아지고 토큰 사용량이 크게 줄어듭니다."
-        )
-        f3.addRow("LLM 호출 절약", self.chk_economy)
-
-        self.spin_econ_max = QtWidgets.QSpinBox()
-        self.spin_econ_max.setRange(20, 500)
-        self.spin_econ_max.setValue(self.config.economy_max_files)
-        self.spin_econ_max.setToolTip("Economy 모드에서 한 호출당 보내는 최대 파일 수")
-        f3.addRow("호출당 최대 파일", self.spin_econ_max)
 
         # Reasoning toggle — only meaningful for OpenAI-compat reasoning
         # models (Qwen3 / DeepSeek-R1 / Magistral / Phi-4-mini-reasoning).
@@ -728,8 +685,8 @@ class SettingsView(QtWidgets.QWidget):
         )
         f3.addRow(self.lbl_reasoning, self.cmb_reasoning)
 
-        c3.addLayout(f3)
-        v.addWidget(call_card)
+        c2.addLayout(f3)
+        v.addWidget(adv_card)
 
         # ────────────────────────────────────────────────────────────
         # Card 4 — 외관
@@ -931,13 +888,31 @@ class SettingsView(QtWidgets.QWidget):
             "base_url": self.config.llm_base_url,
             "model": self.config.model,
         }
-        self.config.batch_size = self.spin_batch.value()
-        self.config.ambiguity_threshold = self.spin_amb.value()
-        self.config.max_excerpt_chars = self.spin_excerpt.value()
+        # Auto-tuned values: never user-editable.  Always force the
+        # behaviour to "single call when it fits, micro-batch otherwise"
+        # and a sensible ambiguity threshold so users don't have to
+        # think about it.
+        self.config.economy_mode = True
+        self.config.local_microbatch_mode = "auto"
+        self.config.batch_size = 30          # legacy fallback only
+        self.config.ambiguity_threshold = 0.15
+        self.config.max_excerpt_chars = 1800
+        # economy_max_files is kept as a soft cap; the planner now uses
+        # the model's real context window when available.
+        self.config.economy_max_files = max(self.config.economy_max_files or 120, 60)
         self.config.appearance = self.cmb_appearance.currentText()
-        self.config.economy_mode = self.chk_economy.isChecked()
-        self.config.economy_max_files = self.spin_econ_max.value()
         self.config.reasoning_mode = self.cmb_reasoning.currentData() or "off"
         save_config(self.config)
         self.config_changed.emit()
-        QtWidgets.QMessageBox.information(self, "저장됨", "설정이 저장되었습니다.")
+
+        # Modal "saved" toast — pin a min-width so the title can't get
+        # ellipsised to "저" on small windows.
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setWindowTitle("설정 저장됨")
+        box.setText("설정이 저장되었습니다.")
+        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+        # Force a roomy minimum so the title bar shows the full text on
+        # any window size, including small / non-maximised states.
+        box.setStyleSheet("QLabel{min-width:280px;}")
+        box.exec()
