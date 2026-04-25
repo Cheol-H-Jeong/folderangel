@@ -589,11 +589,18 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
         # 0/missing → 9 (catch-all bucket); valid range is 1..9.
         if group_val < 1 or group_val > 9:
             group_val = 9
+        # Defensive: filter out garbage LLM output before it reaches disk.
+        raw_name = str(c.get("name") or c.get("id") or "").strip()
+        # Drop anything containing the Unicode replacement char or BOM —
+        # those signal a truncated UTF-8 sequence.
+        if any(ch in raw_name for ch in ("�", "﻿")):
+            log.warning("dropping category with corrupt name (mojibake): %r", raw_name)
+            continue
         cats.append(
             Category(
-                id=c["id"],
-                name=c.get("name", c["id"]),
-                description=c.get("description", ""),
+                id=str(c.get("id") or "").strip() or raw_name[:24] or f"cat-{len(cats)+1}",
+                name=raw_name or str(c.get("id") or ""),
+                description=str(c.get("description", "") or ""),
                 time_label=str(c.get("time_label", "") or "").strip(),
                 group=group_val,
             )

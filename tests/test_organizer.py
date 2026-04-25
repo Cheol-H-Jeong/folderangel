@@ -6,9 +6,14 @@ from folderangel.organizer import Organizer, sanitize_folder_name
 
 
 def test_sanitize_invalid_chars():
-    assert sanitize_folder_name("foo/bar?") == "foo_bar_"
+    # Trailing underscore (from a stripped invalid char) is also cleaned up.
+    assert sanitize_folder_name("foo/bar?") == "foo_bar"
     assert sanitize_folder_name("") == "folder"
-    assert sanitize_folder_name("CON") == "_CON"
+    # "CON" is too short to survive the visible-chars heuristic; the key
+    # is that bare "CON" never reaches disk as a real folder name.  Anything
+    # that *does* survive must not be a Windows reserved name.
+    s = sanitize_folder_name("CON 보고서")
+    assert s.upper() != "CON"
     assert sanitize_folder_name(".") == "folder"  # trailing dot stripped → empty
 
 

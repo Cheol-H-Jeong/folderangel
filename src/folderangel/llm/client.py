@@ -323,6 +323,10 @@ class OpenAICompatClient:
             ],
             "temperature": temperature,
             "response_format": {"type": "json_object"},
+            # Local backends (llama.cpp / Ollama) often default ``max_tokens``
+            # to 256, which truncates a 30-file plan halfway and leaves the
+            # JSON unterminated.  Ask for plenty of headroom.
+            "max_tokens": 8192,
         }
         if self.stream:
             body["stream"] = True
@@ -445,14 +449,41 @@ class OpenAICompatClient:
                         f"openai-compat http {resp.status_code}: {text_preview}"
                     )
                 ttft_box: list = []
+                finish_box: list = []
                 if body.get("stream"):
                     text = _consume_openai_stream(
                         resp, cancel_check, stream_text,
                         start_ts=start_ts, ttft_box=ttft_box,
+                        finish_box=finish_box,
                     )
                 else:
                     data = resp.json()
                     text = _extract_openai_text(data)
+                    try:
+                        fr = data.get("choices", [{}])[0].get("finish_reason")
+                        if fr:
+                            finish_box.append(fr)
+                    except Exception:
+                        pass
+                # Truncated by the model's output cap → the JSON is almost
+                # certainly unterminated.  Bumping max_tokens once and
+                # retrying is the right move; if even that fails we surface
+                # a clean error instead of feeding a half-string into
+                # json.loads.
+                if finish_box and finish_box[0] == "length":
+                    if attempt < self.max_retries and body.get("max_tokens", 0) < 32768:
+                        log.warning(
+                            "openai-compat response truncated (finish_reason=length, %d chars). "
+                            "raising max_tokens and retrying…",
+                            len(text),
+                        )
+                        body["max_tokens"] = max(16384, body.get("max_tokens", 8192) * 2)
+                        attempt += 1
+                        continue
+                    raise LLMError(
+                        "model output was truncated (finish_reason=length); "
+                        "the JSON is incomplete"
+                    )
                 duration = time.monotonic() - start_ts
                 self.request_count += 1
                 self.response_chars += len(text)
@@ -479,7 +510,12 @@ class OpenAICompatClient:
                 try:
                     return json.loads(cleaned)
                 except json.JSONDecodeError:
-                    return json.loads(_strip_code_fence(text))
+                    # Best-effort recovery: strip trailing junk (truncated
+                    # mid-string) and try once more before raising.
+                    try:
+                        return json.loads(_recover_truncated_json(cleaned))
+                    except json.JSONDecodeError:
+                        return json.loads(_strip_code_fence(text))
             except (requests.RequestException, LLMError, json.JSONDecodeError) as exc:
                 last_exc = exc
                 duration = time.monotonic() - start_ts
@@ -529,6 +565,7 @@ def _consume_openai_stream(
     *,
     start_ts: Optional[float] = None,
     ttft_box: Optional[list] = None,
+    finish_box: Optional[list] = None,
 ) -> str:
     """Read an OpenAI SSE stream and return the joined text content.
 
@@ -591,6 +628,8 @@ def _consume_openai_stream(
                         pass
                     last_emit = now
         if choice.get("finish_reason"):
+            if finish_box is not None:
+                finish_box.append(choice.get("finish_reason"))
             # Final flush so the user sees the complete count.
             if stream_text is not None and chunk_text:
                 try:
@@ -599,6 +638,66 @@ def _consume_openai_stream(
                     pass
             break
     return "".join(out)
+
+
+def _recover_truncated_json(text: str) -> str:
+    """Best-effort fixup for JSON that was cut off mid-stream.
+
+    Handles the common case: the model ran out of ``max_tokens`` while
+    inside a string in an array, leaving us with something like::
+
+        {"categories":[{"id":"a","name":"한�
+
+    We:
+      * drop a trailing replacement / BOM char,
+      * close any open string literal,
+      * pop the deepest open ``[`` / ``{`` until the parser is happy.
+
+    Imperfect, but recovers a usable plan from a truncated response.
+    """
+    s = text.rstrip().rstrip("�﻿�")
+    # If we ended inside a string (odd number of unescaped quotes), close it.
+    in_str = False
+    escape = False
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+    if in_str:
+        s = s + '"'
+    # Drop a trailing comma that we might be left with after string close.
+    s = s.rstrip()
+    if s.endswith(","):
+        s = s[:-1]
+    # Balance brackets / braces.
+    opens = []
+    in_str = False
+    escape = False
+    for ch in s:
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch in "[{":
+            opens.append(ch)
+        elif ch in "]}":
+            if opens and {"[": "]", "{": "}"}[opens[-1]] == ch:
+                opens.pop()
+    closer = {"[": "]", "{": "}"}
+    s += "".join(closer[o] for o in reversed(opens))
+    return s
 
 
 def _extract_openai_text(response: dict) -> str:

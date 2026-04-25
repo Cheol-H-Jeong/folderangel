@@ -31,16 +31,45 @@ log = logging.getLogger(__name__)
 
 ProgressCB = Callable[[str, float], None]
 
-_INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Filesystem-illegal chars (Windows + POSIX overlap) plus all C0/C1 control
+# characters and the Unicode replacement character (which appears when the
+# server truncates a UTF-8 sequence mid-byte).
+_INVALID_CHARS = re.compile(
+    r'[<>:"/\\|?*\x00-\x1f\x7f-\x9f�﻿]'
+)
 _TRAILING = re.compile(r"[. ]+$")
+# Stray JSON / markup fragments that sometimes leak when the model's output
+# was truncated mid-string ("name\":\"AVOCA…", "}", trailing commas, etc.).
+_JSON_LEAK = re.compile(
+    r'(?:'
+    r'^["\'\s,{}\[\]:]+'                # leading punctuation/quotes
+    r'|["\'\s,{}\[\]:]+$'              # trailing
+    r'|^\s*"?(?:name|id|title|label)"?\s*["\']?\s*[:=]\s*["\']?\s*'  # leading "name":"
+    r')',
+    flags=re.IGNORECASE,
+)
 
 
 def sanitize_folder_name(name: str, fallback: str = "folder") -> str:
-    """Return a filesystem-safe version of *name* usable on both Linux and Windows."""
+    """Return a filesystem-safe version of *name* usable on both Linux and Windows.
+
+    Hardened against truncated LLM output: replacement chars, BOM, all
+    control codepoints, and stray JSON-fragment leakage are stripped.
+    """
     if not name:
         return fallback
-    cleaned = unicodedata.normalize("NFC", name.strip())
+    cleaned = unicodedata.normalize("NFC", str(name).strip())
+    # 1) Strip JSON-fragment leakage *before* punctuation is masked, since
+    #    the patterns rely on the literal `:`, `"` etc.
+    for _ in range(3):  # idempotent — repeat until stable
+        new = _JSON_LEAK.sub("", cleaned).strip()
+        if new == cleaned:
+            break
+        cleaned = new
+    # 2) Replace invalid filesystem / control / replacement chars
     cleaned = _INVALID_CHARS.sub("_", cleaned)
+    # 3) Collapse multiple underscores/spaces from the substitutions above
+    cleaned = re.sub(r"[_\s]{2,}", " ", cleaned).strip(" _")
     cleaned = _TRAILING.sub("", cleaned)
     # Windows reserved device names
     reserved = {
@@ -50,7 +79,10 @@ def sanitize_folder_name(name: str, fallback: str = "folder") -> str:
     }
     if cleaned.upper() in reserved:
         cleaned = f"_{cleaned}"
-    if not cleaned:
+    # If stripping left us with nothing meaningful (≤1 visible character or
+    # only punctuation) fall back so we don't write garbage to disk.
+    visible = re.sub(r"[\W_]+", "", cleaned)
+    if len(visible) < 2:
         return fallback
     return cleaned[:120]
 
