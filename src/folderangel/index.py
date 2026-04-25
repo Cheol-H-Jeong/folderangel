@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from .models import OperationResult
 
@@ -217,7 +218,48 @@ class IndexDB:
             for r in rows
         ]
 
-    def rollback(self, op_id: int) -> RollbackResult:
+    def latest_operation_id(self) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT id FROM operations ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return row["id"] if row else None
+
+    def rollback(
+        self,
+        op_id: int,
+        *,
+        force: bool = False,
+    ) -> RollbackResult:
+        """Restore the files moved during operation ``op_id``.
+
+        Safety policy:
+          * Rolling back the **most recent** operation is always
+            allowed.  The on-disk state is the closest to what we
+            recorded, so the move-back is well-defined.
+          * Rolling back **any older** operation is dangerous: the
+            user (or a later FolderAngel op) may have re-organised the
+            same files in between, so naively moving them back can
+            overwrite newer work.  We refuse unless ``force=True`` is
+            passed.
+          * Even with ``force=True`` we still skip individual files
+            whose recorded ``new_path`` no longer exists at that exact
+            location (someone moved them elsewhere) or whose recorded
+            ``original_path`` is now occupied by a different file —
+            those collisions are reported in ``failed`` and not
+            overwritten.
+        """
+        latest = self.latest_operation_id()
+        is_latest = (latest is not None and op_id == latest)
+        if not is_latest and not force:
+            return RollbackResult(
+                restored=0,
+                failed=[
+                    f"op_id {op_id} is not the most recent operation "
+                    f"(latest is {latest}); pass force=True to attempt "
+                    "a guarded rollback of an older operation",
+                ],
+            )
+
         rows = self.conn.execute(
             "SELECT id, original_path, new_path FROM files WHERE op_id = ?",
             (op_id,),
@@ -228,7 +270,7 @@ class IndexDB:
 
         restored = 0
         failed: list[str] = []
-        # remove shortcuts first
+        # remove shortcuts first — these are derived state, safe either way.
         for s in shortcuts:
             sp = Path(s["shortcut_path"])
             try:
@@ -242,13 +284,21 @@ class IndexDB:
             orig = Path(r["original_path"])
             new = Path(r["new_path"])
             try:
+                if not new.exists():
+                    failed.append(f"{new}: missing (file moved or deleted since op)")
+                    continue
+                if orig.exists() and orig.resolve() != new.resolve():
+                    # Collision at the original location — refuse to
+                    # overwrite a newer file, even with force.
+                    failed.append(
+                        f"{orig}: target already occupied by a different file; "
+                        "refusing to overwrite"
+                    )
+                    continue
                 orig.parent.mkdir(parents=True, exist_ok=True)
-                if new.exists():
-                    shutil.move(str(new), str(orig))
-                    restored += 1
-                    touched_folders.add(new.parent)
-                else:
-                    failed.append(f"{new}: missing")
+                shutil.move(str(new), str(orig))
+                restored += 1
+                touched_folders.add(new.parent)
             except Exception as exc:
                 failed.append(f"{new}: {exc}")
 

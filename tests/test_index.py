@@ -60,3 +60,68 @@ def test_rollback_restores_files(tmp_path):
     assert (tmp_path / "a.txt").exists()
     assert not f.exists()
     db.close()
+
+
+def _make_recorded_op(tmp_path: Path, src_name: str, dst_dir: str):
+    from folderangel.models import Category, MovedFile, OperationResult
+    folder = tmp_path / dst_dir
+    folder.mkdir(exist_ok=True)
+    f = folder / src_name
+    f.write_text("x")
+    cats = [Category(id="c", name=dst_dir)]
+    moved = [
+        MovedFile(
+            original_path=tmp_path / src_name,
+            new_path=f,
+            category_id="c",
+            reason="x",
+            score=1.0,
+        )
+    ]
+    now = datetime.now().astimezone()
+    return OperationResult(
+        target_root=tmp_path,
+        started_at=now,
+        finished_at=now,
+        dry_run=False,
+        categories=cats,
+        moved=moved,
+        skipped=[],
+        total_scanned=1,
+    )
+
+
+def test_rollback_refuses_older_op_without_force(tmp_path):
+    db = IndexDB(tmp_path / "idx.db")
+    op_id_1 = db.record_operation(_make_recorded_op(tmp_path, "a.txt", "f1"))
+    db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))  # newer
+    res = db.rollback(op_id_1)  # not the latest — must refuse
+    assert res.restored == 0
+    assert res.failed and "not the most recent" in res.failed[0]
+    db.close()
+
+
+def test_rollback_force_skips_collisions(tmp_path):
+    db = IndexDB(tmp_path / "idx.db")
+    op_id_1 = db.record_operation(_make_recorded_op(tmp_path, "a.txt", "f1"))
+    db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))
+    # Simulate the user manually creating a file at the original location
+    # in the meantime — rollback must NOT overwrite it even with force.
+    blocker = tmp_path / "a.txt"
+    blocker.write_text("user-edit")
+    res = db.rollback(op_id_1, force=True)
+    assert res.restored == 0
+    assert any("already occupied" in msg for msg in res.failed)
+    # And the user's file is intact.
+    assert blocker.read_text() == "user-edit"
+    db.close()
+
+
+def test_latest_operation_id(tmp_path):
+    db = IndexDB(tmp_path / "idx.db")
+    assert db.latest_operation_id() is None
+    a = db.record_operation(_make_recorded_op(tmp_path, "a.txt", "f1"))
+    b = db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))
+    assert db.latest_operation_id() == b
+    assert b > a
+    db.close()

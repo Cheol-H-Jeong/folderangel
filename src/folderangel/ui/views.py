@@ -309,6 +309,10 @@ class OrganizeView(QtWidgets.QWidget):
             self.cat_table.setItem(row, 1, QtWidgets.QTableWidgetItem(cat.name))
             self.cat_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(counter.get(cat.id, 0))))
         self.report_card.setVisible(True)
+        # 'Undo' is only meaningful for the operation we just produced —
+        # which IS the latest one at this moment.  It will turn into "an
+        # older op" the moment the user runs another organise; the
+        # History tab governs that case explicitly.
         self.btn_rollback.setEnabled(bool(op.operation_id) and not op.dry_run)
 
     def on_failed(self, msg: str):
@@ -471,14 +475,42 @@ class HistoryView(QtWidgets.QWidget):
             return
         row = idxs[0].row()
         op_id = int(self.table.item(row, 0).text())
-        resp = QtWidgets.QMessageBox.question(
-            self,
-            "롤백",
-            f"오퍼레이션 #{op_id}를 되돌리시겠습니까?",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        latest = self.index_db.latest_operation_id()
+        is_latest = (latest is not None and op_id == latest)
+
+        if is_latest:
+            resp = QtWidgets.QMessageBox.question(
+                self,
+                "롤백",
+                f"가장 최근 정리(#{op_id})를 되돌립니다. 진행할까요?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            )
+            if resp == QtWidgets.QMessageBox.Yes:
+                self.rollback_requested.emit(op_id)
+            return
+
+        # Older operation: gate behind a much louder, explicit warning.
+        warn = QtWidgets.QMessageBox(self)
+        warn.setIcon(QtWidgets.QMessageBox.Warning)
+        warn.setWindowTitle("이전 정리 롤백 — 위험")
+        warn.setText(
+            f"오퍼레이션 #{op_id} 은(는) 가장 최근 정리가 아닙니다.\n"
+            "그 이후에 사용자가 폴더를 더 정리했거나 파일을 옮겼다면,\n"
+            "이 작업은 새로 만든 결과를 덮어쓰거나 깨뜨릴 수 있습니다."
         )
-        if resp == QtWidgets.QMessageBox.Yes:
-            self.rollback_requested.emit(op_id)
+        warn.setInformativeText(
+            "안전하게 되돌리려면 가장 최근 정리부터 차례로 롤백하세요.\n"
+            "그래도 진행하시겠다면 '강제 롤백'을 선택하세요. "
+            "기록과 다르게 이미 옮긴 파일은 자동으로 건너뜁니다."
+        )
+        cancel = warn.addButton("취소", QtWidgets.QMessageBox.RejectRole)
+        force = warn.addButton("강제 롤백", QtWidgets.QMessageBox.DestructiveRole)
+        warn.setDefaultButton(cancel)
+        warn.exec()
+        if warn.clickedButton() is force:
+            # Emit with the force-flag convention: negative op_id means force.
+            # (Keeps the existing Signal signature backwards compatible.)
+            self.rollback_requested.emit(-op_id)
 
 
 class SettingsView(QtWidgets.QWidget):
