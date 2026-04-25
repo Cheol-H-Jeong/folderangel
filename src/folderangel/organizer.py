@@ -254,6 +254,7 @@ class Organizer:
         dry_run: bool = False,
         progress: Optional[ProgressCB] = None,
         cancel_check=None,
+        excerpts: Optional[dict] = None,
     ) -> OperationResult:
         target_root = Path(target_root).resolve()
         started_at = datetime.now().astimezone()
@@ -358,6 +359,10 @@ class Organizer:
                     assign, plan, dir_for, target_root, dry_run, ensure_dir
                 )
                 if moved_entry is not None:
+                    if excerpts is not None:
+                        moved_entry.content_excerpt = (
+                            excerpts.get(str(assign.file_path)) or ""
+                        )[:1800]
                     moved.append(moved_entry)
                     used_category_ids.add(moved_entry.category_id)
                     for sp in moved_entry.shortcuts:
@@ -527,7 +532,11 @@ class Organizer:
                 log.warning("renumber rename failed %s → %s: %s", current, target, exc)
 
     def _handle_mojibake_dir(self, root: Path, current: Path) -> None:
-        """Quarantine a pre-existing mojibake folder name."""
+        """Quarantine a pre-existing mojibake folder name into a single
+        "9. 기타" bucket.  We never produce ``"기타 (2)"`` style siblings —
+        the user explicitly wants exactly one misc folder, no matter how
+        many corrupt names we collapse.
+        """
         try:
             children = list(current.iterdir())
         except OSError:
@@ -541,19 +550,31 @@ class Organizer:
                 log.warning("could not remove %s: %s", current, exc)
             return
 
-        # Non-empty: rename to a safe generic so the user can sort it out
-        # without the OS file manager garbling the path.
-        base = "9. 정리되지 않은 폴더"
-        target = root / base
-        counter = 2
-        while target.exists() and target != current:
-            target = root / f"{base} ({counter})"
-            counter += 1
+        # Non-empty: merge contents into the single canonical 기타 folder.
+        misc = root / "9. 기타"
         try:
-            current.rename(target)
-            log.info("renamed mojibake folder %s → %s", current, target)
+            misc.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            log.warning("could not rename mojibake folder %s: %s", current, exc)
+            log.warning("could not create 9. 기타: %s", exc)
+            return
+        for child in children:
+            dest = misc / child.name
+            counter = 2
+            stem, suffix = (
+                (child.stem, child.suffix) if child.is_file() else (child.name, "")
+            )
+            while dest.exists():
+                dest = misc / f"{stem} ({counter}){suffix}"
+                counter += 1
+            try:
+                shutil.move(str(child), str(dest))
+            except OSError as exc:
+                log.warning("could not merge %s into 9. 기타: %s", child, exc)
+        try:
+            current.rmdir()
+        except OSError:
+            pass
+        log.info("merged mojibake folder %s contents into %s", current, misc)
 
     # -----------------------------------------------------------------
     def _sweep_empty_dirs(self, root: Path) -> None:

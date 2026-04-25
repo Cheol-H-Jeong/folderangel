@@ -391,14 +391,30 @@ class SearchView(QtWidgets.QWidget):
         row.addWidget(btn)
         v.addLayout(row)
 
-        self.table = QtWidgets.QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["파일", "카테고리", "현재 위치", "원본", "정리 시각"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["파일", "매치", "카테고리", "현재 위치", "스니펫", "정리 시각"]
+        )
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        hdr.setStretchLastSection(False)
+        # Sensible default column widths so the filename never starts as
+        # an ellipsis; user can still drag any column wider.
+        self.table.setColumnWidth(0, 320)   # filename
+        self.table.setColumnWidth(1, 70)    # match field
+        self.table.setColumnWidth(2, 200)   # category
+        self.table.setColumnWidth(3, 320)   # current location
+        self.table.setColumnWidth(4, 380)   # snippet
+        self.table.setColumnWidth(5, 130)   # timestamp
+        hdr.setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.doubleClicked.connect(self._open_selected)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(30)
         v.addWidget(self.table, 1)
 
     def focus_search(self):
@@ -407,21 +423,32 @@ class SearchView(QtWidgets.QWidget):
 
     def _do_search(self):
         q = self.search.text().strip()
-        hits = self.index_db.search(q, limit=200)
+        hits = self.index_db.search(q, limit=300)
         self.table.setRowCount(len(hits))
         for row, h in enumerate(hits):
-            self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(Path(h.new_path).name))
-            self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(h.category))
-            self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(h.new_path))
-            self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(h.original_path))
-            self.table.setItem(row, 4, QtWidgets.QTableWidgetItem(h.created_at))
+            filename = Path(h.new_path).name
+            cells = [
+                (filename,           f"{filename}\n원본: {h.original_path}"),
+                (h.matched_in or "", f"매치 위치: {h.matched_in or '미상'}"),
+                (h.category,         h.category),
+                (h.new_path,         h.new_path),
+                (h.snippet or "",    h.snippet or "(미리보기 없음)"),
+                (h.created_at,       h.created_at),
+            ]
+            for col, (text, tip) in enumerate(cells):
+                item = QtWidgets.QTableWidgetItem(text)
+                item.setToolTip(tip)
+                self.table.setItem(row, col, item)
+        self.table.resizeRowsToContents()
 
     def _open_selected(self, idx: QtCore.QModelIndex):
         row = idx.row()
-        item = self.table.item(row, 2)
+        # "Current location" is col 3 in the new layout; fall back to
+        # the filename cell if a row is sparse.
+        item = self.table.item(row, 3) or self.table.item(row, 0)
         if item:
             p = Path(item.text())
-            _open_in_explorer(p.parent if p.exists() else p)
+            _open_in_explorer(p if p.exists() else p.parent)
 
 
 class HistoryView(QtWidgets.QWidget):

@@ -109,8 +109,10 @@ def run(
         progress(f"plan: 카테고리 {len(plan.categories)}개 결정됨", 0.95)
         progress(f"organize: 파일 이동 시작 ({len(plan.assignments)}개)", 0.0)
     organizer = Organizer(config)
+    excerpts_map = {str(e.path): (e.content_excerpt or "") for e in entries}
     op = organizer.execute(
-        target_root, plan, dry_run=dry_run, progress=progress, cancel_check=cancel_check
+        target_root, plan, dry_run=dry_run, progress=progress,
+        cancel_check=cancel_check, excerpts=excerpts_map,
     )
 
     if client is not None:

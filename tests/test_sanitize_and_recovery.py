@@ -59,29 +59,34 @@ def test_user_reported_latin1_mojibake_folder_name_is_rejected():
 
 
 def test_organizer_quarantines_preexisting_mojibake_folder(tmp_path):
-    """User-reported case: a mojibake-named folder remained on disk
-    after a previous run.  The next run must either delete it (empty)
-    or rename it to a generic safe name (non-empty)."""
-    from datetime import datetime
+    """User-reported case: pre-existing mojibake-named folders must be
+    cleaned up — empty ones deleted, non-empty ones merged into the
+    single canonical "9. 기타" bucket (no "기타 (2)" siblings)."""
     from folderangel.config import Config
     from folderangel.models import Plan
     from folderangel.organizer import Organizer
 
     bad_empty = tmp_path / "6. ì ì¡° AI ì¤ì¦ ì§ì (2024)"
     bad_empty.mkdir()
-    bad_kept = tmp_path / "7. ëª¨ì§ ë°ì½ë"
-    bad_kept.mkdir()
-    (bad_kept / "leftover.txt").write_text("x")
+    bad_kept_a = tmp_path / "7. ëª¨ì§ ë°ì½ë A"
+    bad_kept_a.mkdir()
+    (bad_kept_a / "leftover_a.txt").write_text("x")
+    bad_kept_b = tmp_path / "8. ëª¨ì§ ë°ì½ë B"
+    bad_kept_b.mkdir()
+    (bad_kept_b / "leftover_b.txt").write_text("y")
 
     Organizer(Config()).execute(tmp_path, Plan(categories=[], assignments=[]))
 
-    # Empty mojibake folder gone
     assert not bad_empty.exists()
-    # Non-empty mojibake folder renamed to a safe generic
-    assert not bad_kept.exists()
-    safe = list(tmp_path.glob("9. 정리되지 않은 폴더*"))
-    assert safe, f"expected quarantined folder, got: {list(tmp_path.iterdir())}"
-    assert (safe[0] / "leftover.txt").exists()
+    assert not bad_kept_a.exists()
+    assert not bad_kept_b.exists()
+    # Both mojibake folders' contents merged into ONE 기타 — never
+    # produce "기타 (2)".
+    misc = tmp_path / "9. 기타"
+    assert misc.is_dir()
+    assert (misc / "leftover_a.txt").exists()
+    assert (misc / "leftover_b.txt").exists()
+    assert not (tmp_path / "9. 기타 (2)").exists()
 
 
 def test_organizer_uses_median_mtime_of_files(tmp_path):

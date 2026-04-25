@@ -94,15 +94,33 @@ def _parse_pptx_via_xml(path: Path, max_chars: int) -> str:
 
 
 def parse_pptx(path: Path, max_chars: int) -> str:
+    """Extract text from a PPTX.
+
+    We learned the hard way that python-pptx's high-level slide walk
+    crashes with ``'list' object has no attribute 'rId'`` on essentially
+    every Korean deck saved by PowerPoint Korean / Hancom Office (the
+    relationship parts use a list shape that python-pptx's iterator
+    doesn't anticipate).  The raw-XML extractor is both faster and
+    100 % reliable for our purposes (we only need front-matter text),
+    so we use it as the primary path now.  python-pptx is kept only
+    as a tertiary fallback for documents the XML reader couldn't open
+    (e.g. password-protected or ODP-via-extension decks).
+    """
+    text = _parse_pptx_via_xml(path, max_chars)
+    if text:
+        return text
+
+    # XML reader returned nothing — try python-pptx as a last resort.
     try:
         from pptx import Presentation  # type: ignore
     except ImportError:
-        return _parse_pptx_via_xml(path, max_chars)
+        return ""
     try:
         pres = Presentation(str(path))
     except Exception as exc:
-        log.debug("pptx open failed %s: %s — falling back to xml", path, exc)
-        return _parse_pptx_via_xml(path, max_chars)
+        log.debug("pptx open failed %s: %s", path, exc)
+        return ""
+
     chunks: list[str] = []
     total = 0
     try:
@@ -131,17 +149,7 @@ def parse_pptx(path: Path, max_chars: int) -> str:
                         if total >= max_chars:
                             return _cap(chunks, max_chars)
     except Exception as exc:
-        # Some malformed decks raise deep inside python-pptx (e.g. relationship
-        # objects returning lists instead of part refs).  Fall back to the raw
-        # XML extractor so we still get usable text.
-        log.debug("pptx high-level walk failed %s: %s — falling back to xml", path, exc)
-        if not chunks:
-            return _parse_pptx_via_xml(path, max_chars)
-    if total < 40:
-        # If high-level walk produced nothing meaningful, try the XML fallback.
-        xml_text = _parse_pptx_via_xml(path, max_chars)
-        if len(xml_text) > total:
-            return xml_text
+        log.debug("pptx high-level walk failed %s: %s", path, exc)
     return _cap(chunks, max_chars)
 
 

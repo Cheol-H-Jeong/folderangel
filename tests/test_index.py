@@ -117,6 +117,51 @@ def test_rollback_force_skips_collisions(tmp_path):
     db.close()
 
 
+def test_search_finds_by_filename_substring(tmp_path):
+    db = IndexDB(tmp_path / "idx.db")
+    op_id = db.record_operation(_make_recorded_op(tmp_path, "한국지역_제안서_v1.pdf", "f1"))
+    hits = db.search("제안서")
+    assert hits, "expected to find by Korean substring of filename"
+    assert any("제안서" in h.new_path for h in hits)
+    db.close()
+
+
+def test_search_finds_by_content_excerpt(tmp_path):
+    """A file whose name says nothing but whose content_excerpt contains
+    the term should still be findable.
+    """
+    from folderangel.models import Category, MovedFile, OperationResult
+    folder = tmp_path / "f1"
+    folder.mkdir()
+    f = folder / "anonymous_doc.pdf"
+    f.write_text("x")
+    op = OperationResult(
+        target_root=tmp_path,
+        started_at=datetime.now().astimezone(),
+        finished_at=datetime.now().astimezone(),
+        dry_run=False,
+        categories=[Category(id="c", name="f1")],
+        moved=[
+            MovedFile(
+                original_path=tmp_path / "anonymous_doc.pdf",
+                new_path=f,
+                category_id="c",
+                reason="x",
+                score=1.0,
+                content_excerpt="이 문서는 한국지역정보개발원의 초거대 AI 공통기반 사업 보고서입니다.",
+            )
+        ],
+        skipped=[],
+        total_scanned=1,
+    )
+    db = IndexDB(tmp_path / "idx.db")
+    db.record_operation(op)
+    hits = db.search("초거대")
+    assert hits and "anonymous_doc.pdf" in hits[0].new_path
+    assert "초거대" in hits[0].snippet or "초거대" in hits[0].matched_in
+    db.close()
+
+
 def test_latest_operation_id(tmp_path):
     db = IndexDB(tmp_path / "idx.db")
     assert db.latest_operation_id() is None

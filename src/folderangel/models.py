@@ -82,6 +82,10 @@ class MovedFile:
     reason: str = ""
     score: float = 0.0
     shortcuts: list[Path] = field(default_factory=list)
+    # First-page text excerpt collected by the parser; surfaced into the
+    # search index so the user can find files by what's *inside* them,
+    # not just by name.
+    content_excerpt: str = ""
 
 
 @dataclass

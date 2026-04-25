@@ -124,30 +124,46 @@ class Planner:
         (Gemini's REST client has no stream_text support — we fall back
         to plain non-streaming behaviour for it).
         """
-        stream_state = {"chars": 0, "preview": "", "warned": False}
+        stream_state = {
+            "chars": 0,
+            "preview": "",
+            "warned": False,
+            "buffer": "",   # rolling tail to recover whole chars across chunks
+        }
 
         def _on_stream(chunk: str, total: int):
             stream_state["chars"] = total
-            # Don't show raw token previews in the live progress log —
-            # multi-byte boundaries split mid-character, JSON escapes look
-            # like garbage out of context, and even a clean stream looks
-            # noisy.  Just show progress count + the active stage label so
-            # the user knows it's still moving.
-            if progress is not None:
-                progress(f"{stream_label}: {total}자 수신 중…", -1.0)
-                if not stream_state["warned"]:
-                    from .llm.client import _looks_like_mojibake
+            if progress is None:
+                return
+            from .llm.client import _looks_like_mojibake
 
-                    # Only sample the *cumulative* preview to detect
-                    # mojibake — never display it.
-                    stream_state["preview"] = (stream_state["preview"] + chunk)[-512:]
-                    if _looks_like_mojibake(stream_state["preview"]):
-                        stream_state["warned"] = True
-                        progress(
-                            "⚠ 응답이 모지바케로 보입니다 — "
-                            "서버 chat template 또는 양자화 모델 호환 문제일 수 있습니다.",
-                            -1.0,
-                        )
+            # Build a sliding window of the last ~120 visible chars so
+            # the user can actually see what the model is generating.
+            stream_state["buffer"] = (stream_state["buffer"] + chunk)[-160:]
+            window = stream_state["buffer"]
+
+            if _looks_like_mojibake(window, strict=True):
+                # Replace the visible part with a redacted placeholder so we
+                # don't show garbage to the user, but keep the count moving
+                # and warn once per call.
+                if not stream_state["warned"]:
+                    stream_state["warned"] = True
+                    progress(
+                        "⚠ 응답이 모지바케로 보입니다 — 서버 chat template 또는 양자화 모델 호환 문제일 수 있습니다.",
+                        -1.0,
+                    )
+                shown = "●" * min(40, len(window))
+            else:
+                # Sanitise for the log line: collapse whitespace and JSON
+                # whitespace artefacts, but keep Korean/English content.
+                shown = window.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+                # Also strip lone backslashes / surrogates that look ugly
+                # in the toast — purely cosmetic, never alters data.
+                shown = "".join(ch if ch.isprintable() else " " for ch in shown).strip()
+                if len(shown) > 120:
+                    shown = shown[-120:]
+
+            progress(f"{stream_label}: {total}자 수신 중 — …{shown}", -1.0)
 
         try:
             return self.gemini.generate_json(
@@ -714,8 +730,31 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
             )
         )
     cat_ids = {c.id for c in cats}
+    # Collapse any LLM-supplied catch-all category to a single canonical
+    # "기타" bucket so we never end up with both "기타", "프로젝트 외
+    # 자료", and "기타 (2)" living side-by-side.
+    catchall_keywords = ("기타", "그 외", "분류되지 않은", "프로젝트 외", "기타 자료")
+    canonical: list[Category] = []
+    misc_seen = False
+    for c in cats:
+        is_catchall = (
+            c.id == "misc"
+            or any(k in (c.name or "") for k in catchall_keywords)
+        )
+        if is_catchall:
+            if misc_seen:
+                # Drop duplicate catch-alls — assignments to them get
+                # remapped further down.
+                continue
+            misc_seen = True
+            c.id = "misc"
+            c.name = "기타"
+            c.group = 9
+        canonical.append(c)
+    cats = canonical
+    cat_ids = {c.id for c in cats}
     if "misc" not in cat_ids:
-        cats.append(Category(id="misc", name="기타", description="분류되지 않은 파일"))
+        cats.append(Category(id="misc", name="기타", description="분류하기 어려운 파일", group=9))
         cat_ids.add("misc")
 
     assignments: list[Assignment] = []
