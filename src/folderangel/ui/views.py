@@ -431,11 +431,42 @@ class SettingsView(QtWidgets.QWidget):
         wrap.setLayout(row)
         f.addRow("Gemini API 키", wrap)
 
+        # Provider drop-down
+        self.cmb_provider = QtWidgets.QComboBox()
+        self.cmb_provider.addItem("Gemini (Google AI Studio)", "gemini")
+        self.cmb_provider.addItem("OpenAI 호환 (OpenAI / OpenRouter / Ollama / vLLM …)", "openai_compat")
+        for i in range(self.cmb_provider.count()):
+            if self.cmb_provider.itemData(i) == self.config.llm_provider:
+                self.cmb_provider.setCurrentIndex(i)
+                break
+        self.cmb_provider.currentIndexChanged.connect(self._on_provider_changed)
+        f.addRow("LLM 제공자", self.cmb_provider)
+
+        # Base URL (free text — works for any OpenAI-compatible endpoint).
+        self.edit_base_url = QtWidgets.QLineEdit(self.config.llm_base_url)
+        self.edit_base_url.setPlaceholderText(
+            "예: https://api.openai.com/v1, http://localhost:11434/v1, "
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        )
+        f.addRow("엔드포인트 URL", self.edit_base_url)
+
+        # Free-text model so users on alternative providers can type any name.
         self.cmb_model = QtWidgets.QComboBox()
-        self.cmb_model.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"])
-        idx = self.cmb_model.findText(self.config.model)
-        if idx >= 0:
-            self.cmb_model.setCurrentIndex(idx)
+        self.cmb_model.setEditable(True)
+        self.cmb_model.addItems(
+            [
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash-lite",
+                "gpt-4o-mini",
+                "gpt-4o",
+                "claude-3-5-sonnet",
+                "llama-3.1-70b-instruct",
+                "qwen2.5-72b-instruct",
+            ]
+        )
+        if self.config.model:
+            self.cmb_model.setCurrentText(self.config.model)
         f.addRow("모델", self.cmb_model)
 
         self.spin_batch = QtWidgets.QSpinBox()
@@ -506,8 +537,20 @@ class SettingsView(QtWidgets.QWidget):
         self.edit_key.setPlaceholderText("sk-… or AIzaSy… (비워두면 Mock 모드)")
         self.config_changed.emit()
 
+    def _on_provider_changed(self, _idx: int):
+        provider = self.cmb_provider.currentData()
+        # Only suggest a base URL when the user has not typed one yet.
+        if not self.edit_base_url.text().strip():
+            if provider == "openai_compat":
+                self.edit_base_url.setText("https://api.openai.com/v1")
+            elif provider == "gemini":
+                self.edit_base_url.setText("")  # use built-in default
+
     def _save(self):
-        self.config.model = self.cmb_model.currentText()
+        provider = self.cmb_provider.currentData() or "gemini"
+        self.config.llm_provider = provider
+        self.config.llm_base_url = self.edit_base_url.text().strip()
+        self.config.model = self.cmb_model.currentText().strip()
         self.config.batch_size = self.spin_batch.value()
         self.config.ambiguity_threshold = self.spin_amb.value()
         self.config.max_excerpt_chars = self.spin_excerpt.value()

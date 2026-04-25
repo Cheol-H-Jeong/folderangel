@@ -80,12 +80,20 @@ def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) 
             shutil.copy2(target, link_path)
             return link_path
 
-    # ---- Linux: prefer a .desktop launcher so double-click *opens* the file
-    # via xdg-open instead of navigating into it (which is what some file
-    # managers do with symlinks-to-files in their list view).
+    # ---- Linux: try a Type=Link .desktop entry first (file managers open
+    # this with the user's MIME default handler exactly as if the file
+    # itself was double-clicked), then fall back to a Type=Application
+    # launcher with an Exec= line, then to a plain symlink.  We pick the
+    # path that the runtime file manager actually accepts.
     desktop_path = _unique(link_dir / f"{base}.desktop")
     try:
-        _write_desktop_file(desktop_path, target)
+        _write_desktop_link(desktop_path, target)
+        return desktop_path
+    except OSError as exc:
+        log.warning("Type=Link .desktop failed (%s); trying Type=Application", exc)
+
+    try:
+        _write_desktop_application(desktop_path, target)
         return desktop_path
     except OSError as exc:
         log.warning(".desktop launcher failed (%s); falling back to symlink", exc)
@@ -100,43 +108,102 @@ def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) 
     return link_path
 
 
-def _write_desktop_file(path: Path, target: Path) -> None:
-    """Create a ``Type=Application`` .desktop launcher that opens ``target``.
+# ---------------- Linux helpers ----------------
 
-    Linux file managers expect ``Exec=`` to be a literal command line.  We
-    quote the absolute target path and pass it to ``xdg-open``, so the
-    user's MIME default handler (Evince, LibreOffice, image viewer, etc.)
-    handles the actual open.
+
+def _mark_executable_and_trusted(path: Path) -> None:
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Nautilus / GNOME Files 43+ require explicit metadata trust before they
+    # will execute a launcher on double-click.  Both of these are best-effort.
+    for cmd in (
+        ["gio", "set", str(path), "metadata::trusted", "true"],
+        ["gio", "set", str(path), "metadata::xfce-exe-checksum",
+         _file_checksum_hex(path)],
+    ):
+        try:
+            subprocess.run(
+                cmd,
+                check=False,
+                timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+
+def _file_checksum_hex(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _write_desktop_link(path: Path, target: Path) -> None:
+    """Create a ``Type=Link`` ``.desktop`` entry pointing at ``target``.
+
+    File managers treat this as a link to a URI; double-click opens the
+    underlying file with its default handler — same as opening the
+    original file from its real location.
     """
-    quoted = shlex.quote(str(target))
+    target_uri = "file://" + str(target).replace("'", "\\'")
     contents = (
         "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Type=Link\n"
+        f"Name={target.name}\n"
+        f"Comment=FolderAngel link to {target}\n"
+        f"URL={target_uri}\n"
+        f"Icon=text-x-generic\n"
+    )
+    path.write_text(contents, encoding="utf-8")
+    _mark_executable_and_trusted(path)
+
+
+def _write_desktop_application(path: Path, target: Path) -> None:
+    """Create a ``Type=Application`` launcher whose Exec= opens ``target``.
+
+    We pick a launcher command that is more robust than plain ``xdg-open``:
+    ``gio open`` on GNOME, ``kioclient5/6 exec`` on KDE, ``xdg-open`` as
+    final fallback.  The shell wrapper tries them in order so the first
+    one available actually fires.
+    """
+    quoted = shlex.quote(str(target))
+    # ``sh -c`` lets us try multiple openers without depending on the
+    # specific desktop environment.
+    exec_cmd = (
+        "sh -c "
+        + shlex.quote(
+            f"command -v gio >/dev/null 2>&1 && exec gio open {quoted}; "
+            f"command -v kioclient5 >/dev/null 2>&1 && exec kioclient5 exec {quoted}; "
+            f"command -v kioclient6 >/dev/null 2>&1 && exec kioclient6 exec {quoted}; "
+            f"exec xdg-open {quoted}"
+        )
+    )
+    contents = (
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
         "Type=Application\n"
         f"Name={target.name}\n"
         f"Comment=FolderAngel link to {target}\n"
-        f"Exec=xdg-open {quoted}\n"
+        f"Exec={exec_cmd}\n"
+        f"TryExec=xdg-open\n"
         f"Icon=text-x-generic\n"
         "Terminal=false\n"
         "NoDisplay=false\n"
         "Categories=Utility;\n"
     )
     path.write_text(contents, encoding="utf-8")
-    # Mark executable so file managers treat it as a launcher and trust it
-    # without the "Untrusted application launcher" prompt on GNOME.
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    # Some file managers (Nautilus ≥ 43) additionally require the launcher
-    # to be marked trusted via gio metadata.  Best-effort, ignore failures.
-    try:
-        subprocess.run(
-            ["gio", "set", str(path), "metadata::trusted", "true"],
-            check=False,
-            timeout=3,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    _mark_executable_and_trusted(path)
+
+
 
 
 # ---------------- Windows helpers ----------------

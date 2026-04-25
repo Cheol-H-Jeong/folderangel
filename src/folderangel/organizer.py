@@ -59,7 +59,7 @@ _GROUP_PREFIX_RE = re.compile(r"^\s*(\d)\.\s+")
 _TIME_SUFFIX_RE = re.compile(r"\s*\([^()]+\)\s*$")
 
 
-def compose_folder_name(cat: Category) -> str:
+def compose_folder_name(cat: Category, fallback_group: int = 9) -> str:
     """Build the on-disk folder name from a :class:`Category`.
 
     Convention (always applied): ``"{group}. {name} ({time_label})"`` —
@@ -71,11 +71,16 @@ def compose_folder_name(cat: Category) -> str:
         Category("a", "프로젝트 외 자료", group=9, time_label="")
             → "9. 프로젝트 외 자료"
     """
-    g = max(1, min(9, int(cat.group or 9)))
+    raw = int(cat.group or 0)
+    g = raw if 1 <= raw <= 9 else max(1, min(9, fallback_group))
     pieces = [f"{g}.", cat.name or cat.id]
     if cat.time_label:
         pieces.append(f"({cat.time_label})")
     return sanitize_folder_name(" ".join(pieces))
+
+
+def has_group_prefix(name: str) -> bool:
+    return bool(_GROUP_PREFIX_RE.match(name))
 
 
 def _normalize_for_match(folder_name: str) -> str:
@@ -194,6 +199,14 @@ class Organizer:
     ) -> OperationResult:
         target_root = Path(target_root).resolve()
         started_at = datetime.now().astimezone()
+
+        # Defensive: force every category to carry a 1..9 group number,
+        # even if the LLM (or the mock planner) returned 0/None.  We assign
+        # missing groups to 9 (catch-all bucket) so the resulting folders
+        # always end up with a "{n}." prefix.
+        for c in plan.categories:
+            if not (1 <= int(c.group or 0) <= 9):
+                c.group = 9
 
         # Pre-compute safe folder paths for each category id, but *defer*
         # directory creation until we actually place a file (so empty
@@ -347,6 +360,15 @@ class Organizer:
                 if dt is not None and d is not None and d.is_dir():
                     _set_dir_mtime(d, dt)
 
+            # Final pass: any sibling folder under the target root that
+            # still lacks a "{n}." prefix gets renamed to ``"9. <name>"`` so
+            # the whole root follows one naming convention.  We pick 9 (the
+            # catch-all bucket) because by the time we reach this point
+            # those are folders the LLM never even touched.
+            if progress:
+                progress("organize: 폴더명 일관성 정리", 0.985)
+            self._renumber_unnumbered(target_root)
+
             # Empty-folder cleanup: any subdirectory under the target root
             # that is now empty (whether we created it or it pre-existed)
             # gets removed so the result is tidy.
@@ -376,6 +398,35 @@ class Organizer:
         except FileNotFoundError:
             return []
         return out
+
+    # -----------------------------------------------------------------
+    def _renumber_unnumbered(self, root: Path) -> None:
+        """Force every direct child folder to start with ``"N. "``.
+
+        Folders that already match ``_GROUP_PREFIX_RE`` are left alone.
+        For unnumbered folders we prepend ``"9. "`` (the catch-all bucket)
+        and dedupe via the same ``(N)`` suffix scheme used for moves.
+        """
+        try:
+            entries = list(os.scandir(root))
+        except FileNotFoundError:
+            return
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            current = Path(entry.path)
+            if has_group_prefix(current.name):
+                continue
+            new_name = sanitize_folder_name(f"9. {current.name}")
+            target = root / new_name
+            counter = 2
+            while target.exists() and target != current:
+                target = root / f"{new_name} ({counter})"
+                counter += 1
+            try:
+                current.rename(target)
+            except OSError as exc:
+                log.warning("renumber rename failed %s → %s: %s", current, target, exc)
 
     # -----------------------------------------------------------------
     def _sweep_empty_dirs(self, root: Path) -> None:

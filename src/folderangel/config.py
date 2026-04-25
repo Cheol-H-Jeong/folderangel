@@ -47,6 +47,15 @@ def default_paths() -> AppPaths:
 
 @dataclass
 class Config:
+    # LLM provider — "gemini" (Google AI Studio native), "openai_compat" (any
+    # OpenAI Chat Completions compatible endpoint: OpenAI, Together, Groq,
+    # OpenRouter, Ollama with `/v1`, vLLM, LM Studio, Anthropic via gateway,
+    # Gemini via the OpenAI-compatible proxy at
+    # https://generativelanguage.googleapis.com/v1beta/openai, ...).
+    llm_provider: str = "gemini"
+    # For openai_compat: required.  For gemini: optional, defaults to the
+    # Google generative-language host.
+    llm_base_url: str = ""
     model: str = "gemini-2.5-flash"
     batch_size: int = 30
     max_files: int = 5000

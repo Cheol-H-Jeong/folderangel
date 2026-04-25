@@ -23,9 +23,11 @@ def test_desktop_launcher_for_file(tmp_path):
     assert sp.suffix == ".desktop"
     text = sp.read_text(encoding="utf-8")
 
-    # Required keys for a launcher that opens the file rather than navigating
-    assert "Type=Application" in text
-    assert "Exec=xdg-open" in text
+    # Either of the two valid layouts is acceptable.  We require the file
+    # manager to be able to find the original target either via URL= or via
+    # an Exec= line that includes the absolute target path.
+    assert "Type=Link" in text or "Type=Application" in text
+    assert ("URL=file://" in text) or ("Exec=" in text)
     assert str(target) in text
     assert "Name=report.pdf" in text
 

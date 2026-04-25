@@ -23,6 +23,12 @@ def _run_cli(args) -> int:
     config = load_config(paths)
     if args.no_economy:
         config.economy_mode = False
+    if args.provider:
+        config.llm_provider = args.provider
+    if args.base_url:
+        config.llm_base_url = args.base_url
+    if args.model:
+        config.model = args.model
     force_mock = bool(args.mock)
     db = IndexDB(paths.index_db)
 
@@ -80,6 +86,19 @@ def main(argv: list[str] | None = None) -> int:
         "--no-economy",
         action="store_true",
         help="disable single-call economy mode (use per-batch staging)",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["gemini", "openai_compat"],
+        help="override LLM provider (gemini | openai_compat)",
+    )
+    parser.add_argument(
+        "--base-url",
+        help="override LLM endpoint base URL (e.g. http://localhost:11434/v1)",
+    )
+    parser.add_argument(
+        "--model",
+        help="override model name (e.g. gpt-4o-mini, qwen2.5-72b-instruct)",
     )
     parser.add_argument("--quiet", action="store_true")
 

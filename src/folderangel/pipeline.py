@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 from .config import Config, get_api_key
 from .index import IndexDB
-from .llm import GeminiClient
+from .llm import make_llm_client
 from .metadata import collect
 from .models import FileEntry, LLMUsage, OperationResult, Plan
 from .organizer import Organizer
@@ -71,14 +71,14 @@ def run(
     target_root = Path(target_root)
     entries = gather_entries(target_root, config, recursive, progress)
 
-    client: Optional[GeminiClient] = None
+    client = None
     if not force_mock:
         key = get_api_key(config)
         if key:
             try:
-                client = GeminiClient(api_key=key, model=config.model)
+                client = make_llm_client(config, key)
             except Exception as exc:
-                log.warning("gemini init failed: %s", exc)
+                log.warning("llm init failed: %s", exc)
                 client = None
 
     if progress:

@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from .config import Config
-from .llm import GeminiClient, LLMError, mock as mock_planner, prompts
+from .llm import LLMError, mock as mock_planner, prompts
 from .models import Assignment, Category, FileEntry, Plan, SecondaryAssignment
 
 log = logging.getLogger(__name__)
@@ -49,8 +49,12 @@ class Planner:
     def __init__(
         self,
         config: Config,
-        gemini: Optional[GeminiClient] = None,
+        gemini: Optional[Any] = None,
     ) -> None:
+        # ``gemini`` is named that way for backwards compatibility, but it
+        # accepts any object exposing ``generate_json(prompt, *,
+        # heartbeat=None)`` and the usage counters — i.e. either
+        # :class:`GeminiClient` or :class:`OpenAICompatClient`.
         self.config = config
         self.gemini = gemini
 
