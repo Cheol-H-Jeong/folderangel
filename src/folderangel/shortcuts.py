@@ -1,14 +1,28 @@
 """Cross-platform shortcut creation.
 
-On Linux/macOS: symbolic link.
-On Windows: a ``.lnk`` Windows Shell link if ``pywin32`` (or PowerShell) is
-available, else a ``.url`` file as a last-resort fallback.
+We want a shortcut that, when **double-clicked**, opens the original file
+in its default application — never navigates the user into a folder, never
+silently fails.  Implementation per OS:
+
+- **Windows**: a ``.lnk`` Windows Shell link with ``Targetpath`` pointing
+  at the file (pywin32 → PowerShell fallback → ``.url``).  Double-click
+  in Explorer activates the file's default handler.
+- **macOS**: a symbolic link to the file (Finder follows symlinks to
+  files cleanly with the original opener).
+- **Linux**: a ``.desktop`` launcher whose ``Exec=`` calls ``xdg-open``
+  on the absolute target path.  ``Type=Application`` with the executable
+  bit set means double-clicking it in GNOME Files / Nautilus / Dolphin
+  fires the file's default handler instead of navigating into it.  We
+  also fall back to a symlink only when desktop launchers cannot be
+  written for some reason.
 """
 from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -33,10 +47,9 @@ def _unique(path: Path) -> Path:
 def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) -> Path:
     """Create a shortcut inside ``link_dir`` that points to ``target``.
 
-    Returns the absolute path of the created shortcut.  On success the caller
-    should not assume a particular file type: on Linux this will be a symlink
-    named after the original file, on Windows a ``.lnk`` (or ``.url`` on the
-    fallback path).
+    The shortcut, when double-clicked in the OS file manager, opens the
+    *original file* in its default application (it does not navigate to a
+    folder).  Returns the absolute path of the created shortcut.
     """
     target = Path(target).resolve()
     link_dir = Path(link_dir)
@@ -48,7 +61,7 @@ def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) 
         ok = _create_lnk(target, lnk)
         if ok:
             return lnk
-        # Final fallback — a .url file works in Explorer, less ideal for folders
+        # Final fallback — .url file points at the file URI.
         url_file = _unique(link_dir / f"{base}.url")
         url_file.write_text(
             "[InternetShortcut]\nURL=file:///{}\n".format(str(target).replace("\\", "/")),
@@ -56,14 +69,74 @@ def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) 
         )
         return url_file
 
-    # POSIX: symlink with the original filename preserved.
+    if sys.platform == "darwin":
+        # Finder happily opens symlinks to files using the file's default app.
+        link_path = _unique(link_dir / base)
+        try:
+            os.symlink(target, link_path)
+            return link_path
+        except OSError as exc:
+            log.warning("macOS symlink failed (%s), falling back to copy", exc)
+            shutil.copy2(target, link_path)
+            return link_path
+
+    # ---- Linux: prefer a .desktop launcher so double-click *opens* the file
+    # via xdg-open instead of navigating into it (which is what some file
+    # managers do with symlinks-to-files in their list view).
+    desktop_path = _unique(link_dir / f"{base}.desktop")
+    try:
+        _write_desktop_file(desktop_path, target)
+        return desktop_path
+    except OSError as exc:
+        log.warning(".desktop launcher failed (%s); falling back to symlink", exc)
+
     link_path = _unique(link_dir / base)
     try:
         os.symlink(target, link_path)
+        return link_path
     except OSError as exc:
         log.warning("symlink failed (%s), falling back to copy", exc)
         shutil.copy2(target, link_path)
     return link_path
+
+
+def _write_desktop_file(path: Path, target: Path) -> None:
+    """Create a ``Type=Application`` .desktop launcher that opens ``target``.
+
+    Linux file managers expect ``Exec=`` to be a literal command line.  We
+    quote the absolute target path and pass it to ``xdg-open``, so the
+    user's MIME default handler (Evince, LibreOffice, image viewer, etc.)
+    handles the actual open.
+    """
+    quoted = shlex.quote(str(target))
+    contents = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={target.name}\n"
+        f"Comment=FolderAngel link to {target}\n"
+        f"Exec=xdg-open {quoted}\n"
+        f"Icon=text-x-generic\n"
+        "Terminal=false\n"
+        "NoDisplay=false\n"
+        "Categories=Utility;\n"
+    )
+    path.write_text(contents, encoding="utf-8")
+    # Mark executable so file managers treat it as a launcher and trust it
+    # without the "Untrusted application launcher" prompt on GNOME.
+    mode = path.stat().st_mode
+    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Some file managers (Nautilus ≥ 43) additionally require the launcher
+    # to be marked trusted via gio metadata.  Best-effort, ignore failures.
+    try:
+        subprocess.run(
+            ["gio", "set", str(path), "metadata::trusted", "true"],
+            check=False,
+            timeout=3,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 # ---------------- Windows helpers ----------------
