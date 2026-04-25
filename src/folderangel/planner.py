@@ -331,13 +331,17 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
             group_val = int(c.get("group", 0) or 0)
         except (TypeError, ValueError):
             group_val = 0
+        # Force a numeric group on every category so naming stays consistent.
+        # 0/missing → 9 (catch-all bucket); valid range is 1..9.
+        if group_val < 1 or group_val > 9:
+            group_val = 9
         cats.append(
             Category(
                 id=c["id"],
                 name=c.get("name", c["id"]),
                 description=c.get("description", ""),
                 time_label=str(c.get("time_label", "") or "").strip(),
-                group=max(0, min(9, group_val)),
+                group=group_val,
             )
         )
     cat_ids = {c.id for c in cats}

@@ -106,6 +106,29 @@ class LLMUsage:
     def estimated_response_tokens(self) -> int:
         return self.response_chars // 3
 
+    def estimate_cost_usd(self) -> float:
+        """Rough USD cost estimate based on public Gemini pricing.
+
+        Numbers are *approximate* and meant as a back-of-envelope figure
+        for the report — the actual bill depends on the live Google
+        pricing tier at request time.  Prices below are USD per 1M tokens.
+        """
+        # (input_per_1m, output_per_1m)
+        pricing = {
+            "gemini-2.5-flash":     (0.30, 2.50),
+            "gemini-2.5-flash-lite": (0.10, 0.40),
+            "gemini-2.5-pro":       (1.25, 10.00),
+            "gemini-1.5-flash":     (0.075, 0.30),
+            "gemini-1.5-pro":       (1.25, 5.00),
+        }
+        in_rate, out_rate = pricing.get(self.model, (0.30, 2.50))
+        in_tokens = self.estimated_prompt_tokens
+        out_tokens = self.estimated_response_tokens
+        return (in_tokens / 1_000_000) * in_rate + (out_tokens / 1_000_000) * out_rate
+
+    def estimate_cost_krw(self, usd_to_krw: float = 1380.0) -> float:
+        return self.estimate_cost_usd() * usd_to_krw
+
 
 @dataclass
 class OperationResult:

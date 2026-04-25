@@ -55,25 +55,75 @@ def sanitize_folder_name(name: str, fallback: str = "folder") -> str:
     return cleaned[:120]
 
 
+_GROUP_PREFIX_RE = re.compile(r"^\s*(\d)\.\s+")
+_TIME_SUFFIX_RE = re.compile(r"\s*\([^()]+\)\s*$")
+
+
 def compose_folder_name(cat: Category) -> str:
     """Build the on-disk folder name from a :class:`Category`.
 
-    Convention: ``"{group}. {name} ({time_label})"`` with optional pieces
-    omitted gracefully.  Group 0 produces no prefix, empty time produces no
-    suffix.  Examples::
+    Convention (always applied): ``"{group}. {name} ({time_label})"`` —
+    every category gets a 1..9 group prefix, and the time suffix appears
+    only when the LLM provided one.  Examples::
 
         Category("a", "AVOCA 시스템", group=2, time_label="2024-Q3")
             → "2. AVOCA 시스템 (2024-Q3)"
-        Category("a", "프로젝트 외 자료", group=0, time_label="")
-            → "프로젝트 외 자료"
+        Category("a", "프로젝트 외 자료", group=9, time_label="")
+            → "9. 프로젝트 외 자료"
     """
-    parts: list[str] = []
-    if cat.group:
-        parts.append(f"{int(cat.group)}.")
-    parts.append(cat.name or cat.id)
+    g = max(1, min(9, int(cat.group or 9)))
+    pieces = [f"{g}.", cat.name or cat.id]
     if cat.time_label:
-        parts.append(f"({cat.time_label})")
-    return sanitize_folder_name(" ".join(parts))
+        pieces.append(f"({cat.time_label})")
+    return sanitize_folder_name(" ".join(pieces))
+
+
+def _normalize_for_match(folder_name: str) -> str:
+    """Reduce a folder name to its 'core' for fuzzy comparison.
+
+    Drops any leading ``"N. "`` group prefix and trailing ``" (...)"`` time
+    suffix, then casefolds + collapses whitespace so that
+    ``"1. AVOCA 시스템 (2024-Q3)"`` and ``"AVOCA 시스템"`` collide.
+    """
+    s = folder_name.strip()
+    s = _GROUP_PREFIX_RE.sub("", s)
+    s = _TIME_SUFFIX_RE.sub("", s).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s.casefold()
+
+
+_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+
+
+def _tokens(core: str) -> set[str]:
+    return {t for t in _TOKEN_RE.findall(core) if len(t) >= 2}
+
+
+def _fuzzy_match_score(existing_core: str, new_core: str) -> float:
+    """Heuristic score in 0..1 for two normalized folder cores.
+
+    Used to reuse a pre-existing folder when the LLM produced a slightly
+    different but clearly-related new name (e.g. existing "AVOCA" vs new
+    "AVOCA 특허 및 분석 모듈").  We require that the *shorter* side's
+    distinctive tokens are mostly contained in the longer side.
+    """
+    if not existing_core or not new_core:
+        return 0.0
+    if existing_core == new_core:
+        return 1.0
+    a = _tokens(existing_core)
+    b = _tokens(new_core)
+    if not a or not b:
+        return 0.0
+    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
+    inter = smaller & larger
+    if not inter:
+        return 0.0
+    coverage = len(inter) / len(smaller)
+    # Substring shortcut: pre-existing core fully appears as a phrase.
+    if existing_core in new_core or new_core in existing_core:
+        coverage = max(coverage, 0.85)
+    return coverage
 
 
 # ----- Time-label helpers ------------------------------------------------
@@ -153,17 +203,60 @@ class Organizer:
             plan.categories,
             key=lambda c: (c.group or 99, c.time_label or "~", c.name or c.id),
         )
+
+        # Map of normalized-name → existing folder Path.  We use this to
+        # reuse a pre-existing folder whose core name matches a planned
+        # category instead of creating a sibling with a slightly different
+        # group prefix or time suffix.  Pre-existing folders are also
+        # *renamed* to the canonical "N. name (period)" pattern so the
+        # whole target root ends up with consistent folder naming.
+        existing_dirs = self._list_existing_dirs(target_root)
+
         dir_for: dict[str, Path] = {}
-        used_names: set[str] = set()
+        used_paths: set[Path] = set()
         for cat in ordered:
-            name = compose_folder_name(cat)
-            base = name
-            counter = 2
-            while name.lower() in used_names:
-                name = f"{base} ({counter})"
-                counter += 1
-            used_names.add(name.lower())
-            dir_for[cat.id] = target_root / name
+            canonical = compose_folder_name(cat)
+            canonical_path = target_root / canonical
+            cat_core = _normalize_for_match(canonical)
+
+            chosen: Optional[Path] = None
+            best_score = 0.0
+            for d in existing_dirs:
+                if d in used_paths:
+                    continue
+                score = _fuzzy_match_score(_normalize_for_match(d.name), cat_core)
+                if score >= 0.85 and score > best_score:
+                    chosen = d
+                    best_score = score
+            if chosen is None:
+                # No existing folder with the same core name — pick the
+                # canonical path, deduping if necessary.
+                target_path = canonical_path
+                counter = 2
+                while target_path in used_paths or (
+                    target_path.exists() and target_path != canonical_path
+                ):
+                    target_path = target_root / f"{canonical} ({counter})"
+                    counter += 1
+                chosen = target_path
+            else:
+                # Rename the existing folder to the canonical form so the
+                # whole target root follows one naming convention.
+                if chosen.name != canonical and not canonical_path.exists():
+                    if not dry_run:
+                        try:
+                            chosen.rename(canonical_path)
+                            chosen = canonical_path
+                        except OSError as exc:
+                            log.warning(
+                                "rename %s → %s failed: %s",
+                                chosen, canonical_path, exc,
+                            )
+                    else:
+                        chosen = canonical_path
+
+            used_paths.add(chosen)
+            dir_for[cat.id] = chosen
 
         created_dirs: set[Path] = set()
 
@@ -211,6 +304,35 @@ class Organizer:
                     progress(f"  ⚠ 스킵: {assign.file_path.name} ({exc})", idx / total)
                 skipped.append(SkippedFile(path=assign.file_path, reason=str(exc)))
 
+        # Adopt files that were already sitting inside a (now reused) category
+        # folder.  These don't need to be moved, but we record them so the
+        # report and stats reflect the *final* contents of each category.
+        moved_paths = {mf.new_path.resolve() for mf in moved if mf.new_path.exists()}
+        for cid, cdir in dir_for.items():
+            if not cdir.exists() or not cdir.is_dir():
+                continue
+            for entry in os.scandir(cdir):
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                p = Path(entry.path)
+                try:
+                    rp = p.resolve()
+                except OSError:
+                    rp = p
+                if rp in moved_paths:
+                    continue
+                moved.append(
+                    MovedFile(
+                        original_path=p,
+                        new_path=p,
+                        category_id=cid,
+                        reason="기존 폴더 잔존 파일 흡수",
+                        score=1.0,
+                    )
+                )
+                used_category_ids.add(cid)
+                moved_paths.add(rp)
+
         # Report only the categories that ended up hosting at least one file.
         surviving_categories = [c for c in plan.categories if c.id in used_category_ids]
 
@@ -243,6 +365,17 @@ class Organizer:
             skipped=skipped,
             total_scanned=len(plan.assignments),
         )
+
+    # -----------------------------------------------------------------
+    def _list_existing_dirs(self, root: Path) -> list[Path]:
+        out: list[Path] = []
+        try:
+            for entry in os.scandir(root):
+                if entry.is_dir(follow_symlinks=False):
+                    out.append(Path(entry.path))
+        except FileNotFoundError:
+            return []
+        return out
 
     # -----------------------------------------------------------------
     def _sweep_empty_dirs(self, root: Path) -> None:

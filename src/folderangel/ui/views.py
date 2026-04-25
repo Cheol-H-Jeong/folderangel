@@ -221,8 +221,15 @@ class OrganizeView(QtWidgets.QWidget):
         usage = op.llm_usage
         if usage is None or usage.model == "mock" or usage.request_count == 0:
             llm_label = "0 (Mock)"
+            cost_label = "₩0"
         else:
             llm_label = f"{usage.request_count}회"
+            krw = usage.estimate_cost_krw()
+            usd = usage.estimate_cost_usd()
+            if krw < 1.0:
+                cost_label = f"≈ ₩{krw:.2f}\n(${usd:.5f})"
+            else:
+                cost_label = f"≈ ₩{krw:,.1f}\n(${usd:.4f})"
         self.stats_row.update_items(
             [
                 ("스캔 파일", str(op.total_scanned)),
@@ -230,6 +237,7 @@ class OrganizeView(QtWidgets.QWidget):
                 ("바로가기", str(op.total_shortcuts)),
                 ("스킵", str(op.total_skipped)),
                 ("LLM 호출", llm_label),
+                ("예상 비용", cost_label),
             ]
         )
         from collections import Counter

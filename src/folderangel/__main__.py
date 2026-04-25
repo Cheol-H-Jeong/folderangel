@@ -61,6 +61,10 @@ def _run_cli(args) -> int:
                 f"~{u.estimated_prompt_tokens:,} prompt tokens, "
                 f"~{u.estimated_response_tokens:,} response tokens"
             )
+            print(
+                f"Cost  — ≈ ${u.estimate_cost_usd():.5f} USD "
+                f"(≈ ₩{u.estimate_cost_krw():,.2f}, public list prices)"
+            )
     return 0
 
 

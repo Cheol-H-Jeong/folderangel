@@ -51,7 +51,7 @@ class Config:
     batch_size: int = 30
     max_files: int = 5000
     min_categories: int = 3
-    max_categories: int = 12
+    max_categories: int = 30
     ambiguity_threshold: float = 0.15
     max_excerpt_chars: int = 1800
     parse_timeout_s: float = 5.0

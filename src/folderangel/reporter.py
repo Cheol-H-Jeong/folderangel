@@ -31,11 +31,17 @@ def _build(op: OperationResult) -> str:
     if op.llm_usage is not None:
         u = op.llm_usage
         if u.model == "mock" or u.request_count == 0:
-            lines.append("- LLM 사용: 0 호출 (Mock 휴리스틱)")
+            lines.append("- LLM 사용: 0 호출 (Mock 휴리스틱) — 비용 없음")
         else:
+            usd = u.estimate_cost_usd()
+            krw = u.estimate_cost_krw()
             lines.append(
                 f"- LLM 사용: {u.request_count}회 호출 ({u.model}) — "
                 f"입력 ≈ {u.estimated_prompt_tokens:,} 토큰 / 출력 ≈ {u.estimated_response_tokens:,} 토큰"
+            )
+            lines.append(
+                f"- LLM 예상 비용(추정): ≈ ${usd:.5f} USD (≈ ₩{krw:,.1f}) "
+                f"— 공개 단가 기반의 대략 평균치이며 실제 청구액은 다를 수 있습니다."
             )
     lines.append("")
 
