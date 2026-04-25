@@ -124,6 +124,10 @@ class OrganizeView(QtWidgets.QWidget):
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self.cancel_requested)
         actions.addStretch(1)
+        self.btn_open_log = QtWidgets.QPushButton("로그 폴더 열기")
+        self.btn_open_log.setObjectName("Ghost")
+        self.btn_open_log.clicked.connect(self._open_log_dir)
+        actions.addWidget(self.btn_open_log)
         actions.addWidget(self.btn_cancel)
         actions.addWidget(self.btn_primary)
         outer.addLayout(actions)
@@ -274,6 +278,7 @@ class OrganizeView(QtWidgets.QWidget):
         if usage is None or usage.model == "mock" or usage.request_count == 0:
             llm_label = "0 (Mock)"
             cost_label = "₩0"
+            speed_label = "—"
         else:
             llm_label = f"{usage.request_count}회"
             krw = usage.estimate_cost_krw()
@@ -282,6 +287,8 @@ class OrganizeView(QtWidgets.QWidget):
                 cost_label = f"≈ ₩{krw:.2f}\n(${usd:.5f})"
             else:
                 cost_label = f"≈ ₩{krw:,.1f}\n(${usd:.4f})"
+            tps = usage.avg_tokens_per_second()
+            speed_label = f"{tps:.1f} tok/s\n총 {usage.total_duration_s:.1f}s"
         self.stats_row.update_items(
             [
                 ("스캔 파일", str(op.total_scanned)),
@@ -290,6 +297,7 @@ class OrganizeView(QtWidgets.QWidget):
                 ("스킵", str(op.total_skipped)),
                 ("LLM 호출", llm_label),
                 ("예상 비용", cost_label),
+                ("LLM 속도", speed_label),
             ]
         )
         from collections import Counter
@@ -321,7 +329,22 @@ class OrganizeView(QtWidgets.QWidget):
             friendly = "API 키가 인증되지 않았어요. 설정에서 키를 다시 확인해 주세요."
         else:
             friendly = f"문제가 발생했어요: {msg}"
+        try:
+            from ..runlog import current_log_path
+
+            lp = current_log_path()
+            if lp is not None:
+                friendly += f"  ·  자세한 내용은 로그를 확인하세요: {lp}"
+        except Exception:
+            pass
         self._set_toast(("error", "정리를 끝내지 못했어요", friendly))
+
+    def _open_log_dir(self):
+        from ..config import default_paths
+
+        d = default_paths().logs_dir
+        d.mkdir(parents=True, exist_ok=True)
+        _open_in_explorer(d)
 
     def _emit_rollback(self):
         if self._last_op and self._last_op.operation_id:

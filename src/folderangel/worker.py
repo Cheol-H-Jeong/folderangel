@@ -61,6 +61,9 @@ class OrganizeWorker(QtCore.QObject):
             else:
                 self.finished.emit(op)
         except Exception as exc:
+            from .runlog import log_exception
+
+            log_exception("OrganizeWorker.run failed", exc)
             text = str(exc) or type(exc).__name__
             if self._cancel or "cancel" in text.lower() or "취소" in text:
                 self.failed.emit("정리를 취소했습니다")

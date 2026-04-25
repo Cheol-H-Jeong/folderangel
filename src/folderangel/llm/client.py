@@ -85,6 +85,8 @@ class GeminiClient:
         self.request_count: int = 0
         self.prompt_chars: int = 0
         self.response_chars: int = 0
+        self.total_duration_s: float = 0.0
+        self.calls: list = []  # list[LLMCall]
 
     # ------------------------------------------------------------------
     def generate_json(
@@ -164,8 +166,25 @@ class GeminiClient:
                     )
                 data = resp.json()
                 text = _extract_text(data)
+                duration = time.monotonic() - start_ts
                 self.request_count += 1
                 self.response_chars += len(text)
+                self.total_duration_s += duration
+                from ..models import LLMCall
+                self.calls.append(
+                    LLMCall(
+                        label="gemini",
+                        prompt_chars=len(prompt),
+                        response_chars=len(text),
+                        duration_s=duration,
+                        success=True,
+                    )
+                )
+                log.info(
+                    "gemini call ok in %.2fs — prompt=%d chars, response=%d chars (~%.1f tok/s)",
+                    duration, len(prompt), len(text),
+                    (len(text) / 3) / duration if duration > 0 else 0.0,
+                )
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
@@ -174,12 +193,20 @@ class GeminiClient:
                     return json.loads(stripped)
             except (requests.RequestException, LLMError, json.JSONDecodeError) as exc:
                 last_exc = exc
+                duration = time.monotonic() - start_ts
+                from ..models import LLMCall
+                self.calls.append(
+                    LLMCall(
+                        label="gemini",
+                        prompt_chars=len(prompt),
+                        duration_s=duration,
+                        success=False,
+                        error=str(exc)[:200],
+                    )
+                )
                 log.warning(
-                    "gemini call failed (attempt %d/%d, timeout=%.0fs): %s",
-                    attempt + 1,
-                    self.max_retries + 1,
-                    current_timeout,
-                    exc,
+                    "gemini call failed in %.2fs (attempt %d/%d, timeout=%.0fs): %s",
+                    duration, attempt + 1, self.max_retries + 1, current_timeout, exc,
                 )
                 attempt += 1
                 if attempt <= self.max_retries:
@@ -253,6 +280,8 @@ class OpenAICompatClient:
         self.request_count: int = 0
         self.prompt_chars: int = 0
         self.response_chars: int = 0
+        self.total_duration_s: float = 0.0
+        self.calls: list = []  # list[LLMCall]
 
     # ------------------------------------------------------------------
     def generate_json(
@@ -375,25 +404,57 @@ class OpenAICompatClient:
                     raise LLMError(
                         f"openai-compat http {resp.status_code}: {text_preview}"
                     )
+                ttft_box: list = []
                 if body.get("stream"):
-                    text = _consume_openai_stream(resp, cancel_check, stream_text)
+                    text = _consume_openai_stream(
+                        resp, cancel_check, stream_text,
+                        start_ts=start_ts, ttft_box=ttft_box,
+                    )
                 else:
                     data = resp.json()
                     text = _extract_openai_text(data)
+                duration = time.monotonic() - start_ts
                 self.request_count += 1
                 self.response_chars += len(text)
+                self.total_duration_s += duration
+                from ..models import LLMCall
+                ttft = ttft_box[0] if ttft_box else 0.0
+                self.calls.append(
+                    LLMCall(
+                        label="openai-compat",
+                        prompt_chars=len(prompt),
+                        response_chars=len(text),
+                        duration_s=duration,
+                        ttft_s=ttft,
+                        success=True,
+                    )
+                )
+                tps = (len(text) / 3) / duration if duration > 0 else 0.0
+                log.info(
+                    "openai-compat call ok in %.2fs (ttft %.2fs) — "
+                    "prompt=%d chars, response=%d chars (~%.1f tok/s)",
+                    duration, ttft, len(prompt), len(text), tps,
+                )
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
                     return json.loads(_strip_code_fence(text))
             except (requests.RequestException, LLMError, json.JSONDecodeError) as exc:
                 last_exc = exc
+                duration = time.monotonic() - start_ts
+                from ..models import LLMCall
+                self.calls.append(
+                    LLMCall(
+                        label="openai-compat",
+                        prompt_chars=len(prompt),
+                        duration_s=duration,
+                        success=False,
+                        error=str(exc)[:200],
+                    )
+                )
                 log.warning(
-                    "openai-compat call failed (attempt %d/%d, timeout=%.0fs): %s",
-                    attempt + 1,
-                    self.max_retries + 1,
-                    current_timeout,
-                    exc,
+                    "openai-compat call failed in %.2fs (attempt %d/%d, timeout=%.0fs): %s",
+                    duration, attempt + 1, self.max_retries + 1, current_timeout, exc,
                 )
                 # Don't keep retrying after an explicit user cancel.
                 if isinstance(exc, LLMError) and "canceled" in str(exc):
@@ -424,6 +485,9 @@ def _consume_openai_stream(
     resp: "requests.Response",
     cancel_check: Optional[Callable[[], bool]],
     stream_text: Optional[Callable[[str, int], None]] = None,
+    *,
+    start_ts: Optional[float] = None,
+    ttft_box: Optional[list] = None,
 ) -> str:
     """Read an OpenAI SSE stream and return the joined text content.
 
@@ -472,6 +536,8 @@ def _consume_openai_stream(
         elif isinstance(chunk, str):
             chunk_text = chunk
         if chunk_text:
+            if ttft_box is not None and not ttft_box:
+                ttft_box.append(time.monotonic() - (start_ts or time.monotonic()))
             out.append(chunk_text)
             total += len(chunk_text)
             if stream_text is not None:

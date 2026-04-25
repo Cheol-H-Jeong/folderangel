@@ -139,6 +139,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start(self, path: str, recursive: bool, dry_run: bool):
         if self._thread is not None:
             return
+        # Open a fresh per-run log file so every Organize run is captured
+        # with full INFO/DEBUG and tracebacks.
+        from ..runlog import start_session
+
+        try:
+            start_session("organize")
+        except Exception:
+            pass
         self._thread = QtCore.QThread()
         self._worker = OrganizeWorker(
             Path(path), self.config, recursive, dry_run, self.index_db
@@ -218,6 +226,12 @@ class MainWindow(QtWidgets.QMainWindow):
 def launch(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from ..runlog import start_session
+
+    try:
+        start_session("gui")
+    except Exception:
+        pass
 
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

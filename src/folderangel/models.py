@@ -91,11 +91,42 @@ class SkippedFile:
 
 
 @dataclass
+class LLMCall:
+    """One LLM HTTP round-trip with timing breakdown."""
+    label: str = ""
+    prompt_chars: int = 0
+    response_chars: int = 0
+    duration_s: float = 0.0       # total wall-clock
+    ttft_s: float = 0.0           # time to first token (streaming only; 0 otherwise)
+    success: bool = True
+    error: str = ""
+
+    @property
+    def tokens_per_second(self) -> float:
+        if self.duration_s <= 0:
+            return 0.0
+        return (self.response_chars / 3) / self.duration_s
+
+
+@dataclass
 class LLMUsage:
     request_count: int = 0
     prompt_chars: int = 0
     response_chars: int = 0
     model: str = ""
+    total_duration_s: float = 0.0
+    calls: list[LLMCall] = field(default_factory=list)
+
+    def avg_tokens_per_second(self) -> float:
+        if self.total_duration_s <= 0:
+            return 0.0
+        return (self.response_chars / 3) / self.total_duration_s
+
+    def avg_ttft_s(self) -> float:
+        ttfts = [c.ttft_s for c in self.calls if c.ttft_s > 0]
+        if not ttfts:
+            return 0.0
+        return sum(ttfts) / len(ttfts)
 
     @property
     def estimated_prompt_tokens(self) -> int:

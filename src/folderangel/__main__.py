@@ -16,8 +16,11 @@ def _run_cli(args) -> int:
     from .config import default_paths, load_config
     from .index import IndexDB
     from .pipeline import run
+    from .runlog import current_log_path, start_session
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    log_path = start_session("cli")
+    print(f"log → {log_path}")
 
     paths = default_paths()
     config = load_config(paths)
@@ -71,6 +74,19 @@ def _run_cli(args) -> int:
                 f"~{u.estimated_prompt_tokens:,} prompt tokens, "
                 f"~{u.estimated_response_tokens:,} response tokens"
             )
+            tps = u.avg_tokens_per_second()
+            ttft = u.avg_ttft_s()
+            ttft_str = f", TTFT≈{ttft:.2f}s" if ttft > 0 else ""
+            print(
+                f"Speed — {u.total_duration_s:.1f}s total, ≈{tps:.1f} tok/s avg{ttft_str}"
+            )
+            for i, c in enumerate(u.calls, 1):
+                ok = "✓" if c.success else "✗"
+                print(
+                    f"  call {i:>2}: {ok} {c.duration_s:6.2f}s "
+                    f"prompt={c.prompt_chars:>5} resp={c.response_chars:>5} "
+                    + (f"({c.tokens_per_second:.1f} tok/s)" if c.success else f"err: {c.error}")
+                )
             print(
                 f"Cost  — ≈ ${u.estimate_cost_usd():.5f} USD "
                 f"(≈ ₩{u.estimate_cost_krw():,.2f}, public list prices)"

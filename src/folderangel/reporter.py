@@ -39,11 +39,35 @@ def _build(op: OperationResult) -> str:
                 f"- LLM 사용: {u.request_count}회 호출 ({u.model}) — "
                 f"입력 ≈ {u.estimated_prompt_tokens:,} 토큰 / 출력 ≈ {u.estimated_response_tokens:,} 토큰"
             )
+            tps = u.avg_tokens_per_second()
+            ttft = u.avg_ttft_s()
+            lines.append(
+                f"- LLM 응답 성능: 총 {u.total_duration_s:.1f}초 / "
+                f"평균 처리량 ≈ {tps:.1f} tok/s"
+                + (f" · 평균 TTFT {ttft:.2f}s" if ttft > 0 else "")
+            )
             lines.append(
                 f"- LLM 예상 비용(추정): ≈ ${usd:.5f} USD (≈ ₩{krw:,.1f}) "
                 f"— 공개 단가 기반의 대략 평균치이며 실제 청구액은 다를 수 있습니다."
             )
     lines.append("")
+
+    # Per-call breakdown so the user can see *which* call was slow.
+    if op.llm_usage is not None and op.llm_usage.calls:
+        lines.append("## LLM 호출 상세")
+        lines.append("")
+        lines.append("| # | 결과 | 소요 | TTFT | 입력(자) | 출력(자) | 처리량 | 비고 |")
+        lines.append("| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |")
+        for i, c in enumerate(op.llm_usage.calls, 1):
+            status = "✅" if c.success else "❌"
+            ttft = f"{c.ttft_s:.2f}s" if c.ttft_s > 0 else "—"
+            tps = f"{c.tokens_per_second:.1f} tok/s" if c.success and c.duration_s > 0 else "—"
+            note = c.error if not c.success else c.label
+            lines.append(
+                f"| {i} | {status} | {c.duration_s:.2f}s | {ttft} | "
+                f"{c.prompt_chars:,} | {c.response_chars:,} | {tps} | {note} |"
+            )
+        lines.append("")
 
     # Category distribution
     counter = Counter(m.category_id for m in op.moved)

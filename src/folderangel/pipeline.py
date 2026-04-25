@@ -119,6 +119,8 @@ def run(
             prompt_chars=client.prompt_chars,
             response_chars=client.response_chars,
             model=config.model,
+            total_duration_s=getattr(client, "total_duration_s", 0.0),
+            calls=list(getattr(client, "calls", [])),
         )
     else:
         op.llm_usage = LLMUsage(model="mock")
