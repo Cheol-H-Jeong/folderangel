@@ -9,6 +9,14 @@ before committing — walk this checklist and explicitly verify each
 applicable item.  Do not skip silently.  When a rule does not apply to
 the current change, say so.  Treat unverified items as defects.
 
+**Self-update loop (permanent rule):** Every time the user points out a
+defect in any project I work on, I (1) fix it, (2) abstract the lesson
+into a project-agnostic rule, (3) append or sharpen the relevant item
+in this manual *before* closing the conversation, (4) commit/push the
+manual update along with the fix, (5) note in the response which item
+was added.  No user-reported bug is allowed to leave only a one-off
+fix behind — every one becomes a permanent guard.
+
 ---
 
 ## A. End-to-end UX completeness
