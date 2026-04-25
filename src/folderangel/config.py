@@ -109,6 +109,16 @@ class Config:
     # ``auto`` = enable for openai_compat only.
     local_microbatch_mode: str = "auto"  # auto | on | off
     local_chunk_size: int = 12  # files per Pass-A and Pass-B call
+
+    # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
+    # Phi-4-mini-reasoning style models.
+    #   "off"  — disable thinking (default, much faster for our JSON task)
+    #   "on"   — let the model reason; response will include <think>…</think>
+    #            and we transparently strip it before parsing
+    #   "auto" — pick based on the model: off for known reasoning models
+    #            (matches the "off" behaviour); kept as an alias for
+    #            future server-side defaults
+    reasoning_mode: str = "off"
     # API key is stored separately (keyring) but mirrored here only if keyring fails
     api_key_fallback: str = ""
     ignore_patterns: list[str] = field(

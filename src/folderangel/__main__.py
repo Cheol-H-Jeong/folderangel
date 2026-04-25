@@ -36,6 +36,8 @@ def _run_cli(args) -> int:
         config.llm_base_url = args.base_url
     if args.model:
         config.model = args.model
+    if args.reasoning:
+        config.reasoning_mode = args.reasoning
     force_mock = bool(args.mock)
     db = IndexDB(paths.index_db)
 
@@ -119,6 +121,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model",
         help="override model name (e.g. gpt-4o-mini, qwen2.5-72b-instruct)",
+    )
+    parser.add_argument(
+        "--reasoning",
+        choices=["off", "on", "auto"],
+        help="thinking mode for Qwen3 / DeepSeek-R1 style models "
+             "(default off — much faster for our JSON task)",
     )
     parser.add_argument("--quiet", action="store_true")
 

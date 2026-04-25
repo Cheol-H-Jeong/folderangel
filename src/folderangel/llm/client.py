@@ -61,7 +61,12 @@ def make_llm_client(config, api_key: Optional[str]):
     if provider in ("openai", "openai_compat", "openai-compatible", "compat"):
         if not base_url:
             base_url = "https://api.openai.com/v1"
-        return OpenAICompatClient(api_key=api_key, model=model, base_url=base_url)
+        return OpenAICompatClient(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            reasoning_mode=getattr(config, "reasoning_mode", "off"),
+        )
     raise LLMError(f"unknown llm provider: {provider}")
 
 
@@ -273,6 +278,7 @@ class OpenAICompatClient:
         timeout: float = 600.0,
         max_retries: int = 3,
         stream: bool = True,
+        reasoning_mode: str = "off",
     ) -> None:
         if not api_key:
             raise LLMError("empty api key")
@@ -284,6 +290,8 @@ class OpenAICompatClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.stream = stream
+        # "on" / "off" / "auto" — see config.Config.reasoning_mode
+        self.reasoning_mode = (reasoning_mode or "off").lower()
         self.request_count: int = 0
         self.prompt_chars: int = 0
         self.response_chars: int = 0
@@ -318,13 +326,26 @@ class OpenAICompatClient:
         }
         if self.stream:
             body["stream"] = True
-        # Qwen3 / GPT-OSS-style thinking models burn hundreds of "reasoning"
-        # tokens before the actual answer.  For our task (returning a JSON
-        # plan) the extra reasoning is wasted compute.  We disable it via
-        # every knob the major backends recognise; servers that don't know
-        # the field simply ignore it.
+        # Reasoning ("thinking") models: Qwen3 / DeepSeek-R1 / Magistral /
+        # Phi-4-mini-reasoning generate hundreds of internal reasoning
+        # tokens before the actual answer.  For our task (return a JSON
+        # plan) those tokens are pure overhead, but for users who want
+        # them — Open WebUI shows them as a collapsed "💭 Thought for…"
+        # block — the model still works either way.  Honour the user's
+        # ``reasoning_mode`` config knob:
+        #   "off"  → actively disable via every knob the major backends
+        #            recognise (default; ~5–10× faster on our task).
+        #   "on"   → leave thinking enabled; we transparently strip the
+        #            ``…</think>`` prefix from the response before parsing.
+        #   "auto" → same as "off" today; reserved for future heuristics.
         model_lc = (self.model or "").lower()
-        if any(tag in model_lc for tag in ("qwen3", "qwen-3", "deepseek-r1", "magistral", "phi-4-mini-reasoning")):
+        is_reasoning_model = any(
+            tag in model_lc
+            for tag in ("qwen3", "qwen-3", "deepseek-r1", "magistral", "phi-4-mini-reasoning")
+        )
+        mode = (self.reasoning_mode or "off").lower()
+        want_thinking = (mode == "on")
+        if is_reasoning_model and not want_thinking:
             body.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
             # llama.cpp also accepts a `/no_think` prefix on the user turn.
             if body["messages"] and isinstance(body["messages"][-1].get("content"), str):

@@ -582,6 +582,21 @@ class SettingsView(QtWidgets.QWidget):
         self.spin_excerpt.setValue(self.config.max_excerpt_chars)
         f.addRow("본문 최대 글자", self.spin_excerpt)
 
+        # Reasoning ("thinking") mode toggle for Qwen3 / DeepSeek-R1 / etc.
+        self.cmb_reasoning = QtWidgets.QComboBox()
+        self.cmb_reasoning.addItem("끄기 (속도 우선, 권장)", "off")
+        self.cmb_reasoning.addItem("켜기 (사고 과정 사용 — 5~10배 느려짐)", "on")
+        self.cmb_reasoning.addItem("자동 (현재는 끄기와 동일)", "auto")
+        for i in range(self.cmb_reasoning.count()):
+            if self.cmb_reasoning.itemData(i) == self.config.reasoning_mode:
+                self.cmb_reasoning.setCurrentIndex(i)
+                break
+        self.cmb_reasoning.setToolTip(
+            "Qwen3/DeepSeek-R1 같은 reasoning 모델의 <think> 단계.\n"
+            "폴더 분류는 단순 JSON 출력이라 보통 끄는 것이 5~10배 빠릅니다."
+        )
+        f.addRow("Reasoning 모드", self.cmb_reasoning)
+
         self.chk_economy = QtWidgets.QCheckBox("LLM 호출 최소화 (Economy 모드)")
         self.chk_economy.setChecked(self.config.economy_mode)
         self.chk_economy.setToolTip(
@@ -670,6 +685,7 @@ class SettingsView(QtWidgets.QWidget):
         self.config.appearance = self.cmb_appearance.currentText()
         self.config.economy_mode = self.chk_economy.isChecked()
         self.config.economy_max_files = self.spin_econ_max.value()
+        self.config.reasoning_mode = self.cmb_reasoning.currentData() or "off"
         save_config(self.config)
         self.config_changed.emit()
         QtWidgets.QMessageBox.information(self, "저장됨", "설정이 저장되었습니다.")
