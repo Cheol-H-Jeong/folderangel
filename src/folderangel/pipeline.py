@@ -84,7 +84,7 @@ def run(
 
     client = None
     if not force_mock:
-        key = get_api_key(config)
+        key = get_api_key(config, provider=config.llm_provider)
         if key:
             try:
                 client = make_llm_client(config, key)

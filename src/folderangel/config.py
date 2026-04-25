@@ -12,7 +12,14 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 _KEYRING_SERVICE = "folderangel"
-_KEYRING_USER = "gemini_api_key"
+_KEYRING_USER = "gemini_api_key"  # legacy, kept for migration
+
+
+def _keyring_user_for(provider: str) -> str:
+    p = (provider or "gemini").lower()
+    if p in ("openai_compat", "openai", "compat"):
+        return "openai_compat_api_key"
+    return "gemini_api_key"
 
 
 @dataclass
@@ -86,6 +93,16 @@ class Config:
     # Google generative-language host.
     llm_base_url: str = ""
     model: str = "gemini-2.5-flash"
+    # Per-provider remembered values so toggling between Gemini and an
+    # OpenAI-compat backend in Settings restores the last configuration
+    # used for each one (URL + model).  ``api_key`` is still kept in the
+    # OS keyring under provider-specific service names; see config helpers.
+    llm_settings_by_provider: dict = field(
+        default_factory=lambda: {
+            "gemini": {"base_url": "", "model": "gemini-2.5-flash"},
+            "openai_compat": {"base_url": "", "model": "gpt-4o-mini"},
+        }
+    )
     batch_size: int = 30
     max_files: int = 5000
     min_categories: int = 3
@@ -180,42 +197,63 @@ def _try_keyring():  # lazily imported so tests don't need it
         return None
 
 
-def get_api_key(cfg: Optional[Config] = None) -> Optional[str]:
-    """Resolve API key by priority: env → keyring → config fallback.
+def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) -> Optional[str]:
+    """Resolve the API key for the *current* (or specified) provider.
 
-    Env vars checked: GEMINI_API_KEY, GOOGLE_API_KEY.
+    Lookup order: env → keyring (provider-specific) → keyring (legacy) →
+    config fallback.  Env vars checked depend on provider:
+
+      gemini        → GEMINI_API_KEY, GOOGLE_API_KEY
+      openai_compat → OPENAI_API_KEY, FOLDERANGEL_OPENAI_API_KEY
     """
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if key:
-        return key.strip()
+    p = (provider or (cfg.llm_provider if cfg else "gemini")).lower()
+    env_keys = (
+        ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+        if p == "gemini"
+        else ["OPENAI_API_KEY", "FOLDERANGEL_OPENAI_API_KEY"]
+    )
+    for name in env_keys:
+        v = os.environ.get(name)
+        if v:
+            return v.strip()
     kr = _try_keyring()
     if kr is not None:
-        try:
-            value = kr.get_password(_KEYRING_SERVICE, _KEYRING_USER)
-            if value:
-                return value.strip()
-        except Exception as exc:
-            log.warning("keyring read failed: %s", exc)
+        # provider-specific slot first, then legacy "gemini_api_key" so we
+        # don't lose users who configured the app before this split.
+        for slot in (_keyring_user_for(p), _KEYRING_USER):
+            try:
+                value = kr.get_password(_KEYRING_SERVICE, slot)
+                if value:
+                    return value.strip()
+            except Exception as exc:
+                log.warning("keyring read failed: %s", exc)
+                break
     if cfg and cfg.api_key_fallback:
         return cfg.api_key_fallback.strip()
     return None
 
 
-def set_api_key(key: str, cfg: Optional[Config] = None, paths: Optional[AppPaths] = None) -> bool:
-    """Persist API key. Returns True if stored securely (keyring), False if config fallback."""
+def set_api_key(
+    key: str,
+    cfg: Optional[Config] = None,
+    paths: Optional[AppPaths] = None,
+    provider: Optional[str] = None,
+) -> bool:
+    """Persist the API key for *this provider*.  Returns True if stored
+    securely (keyring), False if config fallback.
+    """
     key = (key or "").strip()
+    p = (provider or (cfg.llm_provider if cfg else "gemini")).lower()
     kr = _try_keyring()
     if kr is not None:
         try:
-            kr.set_password(_KEYRING_SERVICE, _KEYRING_USER, key)
-            # clear fallback if we had one
+            kr.set_password(_KEYRING_SERVICE, _keyring_user_for(p), key)
             if cfg is not None and cfg.api_key_fallback:
                 cfg.api_key_fallback = ""
                 save_config(cfg, paths)
             return True
         except Exception as exc:
             log.warning("keyring write failed: %s", exc)
-    # Fallback to config file (clearly marked)
     cfg = cfg or load_config(paths)
     cfg.api_key_fallback = key
     save_config(cfg, paths)
