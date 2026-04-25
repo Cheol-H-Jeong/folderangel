@@ -179,10 +179,10 @@ class Planner:
         #   Pass B  – per-chunk assignment using the final categories.
         # Total inference count is bounded by 2 × ceil(N / chunk) + 1,
         # but every single call fits comfortably in 4–8k context.
-        if self._should_use_microbatch():
+        if self._should_use_microbatch(payloads):
             try:
                 if progress:
-                    progress("plan: micro-batch 모드 (로컬 LLM)…", 0.2)
+                    progress("plan: micro-batch 모드 (컨텍스트 초과 분할)…", 0.2)
                 plan_dict = self._microbatch_plan(payloads, progress)
                 return _plan_from_dict(plan_dict, entries)
             except Exception as exc:
@@ -291,19 +291,58 @@ class Planner:
 
 
     # ------------------------------------------------------------------
-    def _should_use_microbatch(self) -> bool:
+    def _should_use_microbatch(self, payloads: Optional[list[dict]] = None) -> bool:
+        """Decide between single-call economy and 3-pass micro-batch.
+
+        Policy:
+          ``on``   → always micro-batch.
+          ``off``  → never micro-batch.
+          ``auto`` → estimate the prompt size in tokens and compare to the
+                     model's context window minus a response budget.
+                     Fits = single call (much faster); doesn't fit =
+                     micro-batch.
+
+        We need the actual file payloads for the auto path, so the auto
+        branch returns a tuple-friendly bool here and the planner passes
+        them in.  Callers without payload context get the legacy
+        provider-based default.
+        """
         mode = (getattr(self.config, "local_microbatch_mode", "auto") or "auto").lower()
         if mode == "on":
             return True
         if mode == "off":
             return False
-        # auto: enable for OpenAI-compat (typically a local model with a
-        # small context) and disable for Gemini (huge context, fast).
-        return (getattr(self.config, "llm_provider", "gemini") or "gemini").lower() in (
-            "openai_compat",
-            "openai",
-            "compat",
+        # auto — size-based decision.  If we don't yet have payloads to
+        # estimate, fall back to the provider hint (Gemini → no
+        # micro-batch; OpenAI-compat → tentatively yes, will be revisited
+        # once payloads exist).
+        if not payloads:
+            return (getattr(self.config, "llm_provider", "gemini") or "gemini").lower() in (
+                "openai_compat", "openai", "compat",
+            )
+
+        # Build the prompt we *would* send and estimate its token cost.
+        prompt = prompts.build_single_call(
+            payloads,
+            self.config.min_categories,
+            self.config.max_categories,
+            self.config.ambiguity_threshold,
         )
+        # Korean+JSON mixed: ~3 chars/token is a safe upper bound.
+        prompt_tokens_est = max(1, len(prompt) // 3)
+
+        ctx = getattr(self.gemini, "context_length", lambda *_: None)()
+        if not ctx:
+            ctx = getattr(self.config, "assumed_ctx_tokens", 8192)
+        budget = getattr(self.config, "response_token_budget", 4096)
+        usable = max(1024, ctx - budget)
+        decision = prompt_tokens_est > usable
+        log.info(
+            "auto microbatch decision: prompt≈%d tok, ctx=%d, usable=%d → %s",
+            prompt_tokens_est, ctx, usable,
+            "micro-batch" if decision else "single-call",
+        )
+        return decision
 
     def _microbatch_plan(
         self, payloads: list[dict], progress: Optional[ProgressCB]

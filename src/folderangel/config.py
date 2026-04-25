@@ -103,12 +103,23 @@ class Config:
     economy_mode: bool = True
     # Soft cap on how many files we send in a single combined call.
     economy_max_files: int = 120
-    # Micro-batch path used for small-context local LLMs (Qwen / Llama /
-    # Phi running on Ollama / LM Studio etc.).  Auto-enabled when the
-    # provider is openai_compat; can be forced on/off here.
-    # ``auto`` = enable for openai_compat only.
+    # Micro-batch path for small-context local LLMs (Qwen / Llama / Phi
+    # running on Ollama / LM Studio etc.).  In ``auto`` mode the planner
+    # estimates the prompt size in tokens; if the estimate fits inside
+    # the model's advertised context window (with a generous safety
+    # margin reserved for the response), a single economy call is used
+    # — same path Gemini takes.  If it doesn't fit, we fall through to
+    # micro-batch.  Force ``on`` / ``off`` to override the heuristic.
     local_microbatch_mode: str = "auto"  # auto | on | off
-    local_chunk_size: int = 12  # files per Pass-A and Pass-B call
+    local_chunk_size: int = 12  # files per Pass-A and Pass-B call when micro-batch is used
+    # Heuristic ceiling assumed when we cannot detect the model's
+    # ``n_ctx`` automatically.  Conservative — most modern local models
+    # advertise ≥ 8 192.
+    assumed_ctx_tokens: int = 8192
+    # How many tokens we leave unused for the response (and any chat
+    # template / tool overhead).  A 1-call plan needs to fit the prompt
+    # *and* the JSON it produces.
+    response_token_budget: int = 4096
 
     # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
     # Phi-4-mini-reasoning style models.

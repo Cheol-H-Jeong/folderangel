@@ -70,6 +70,18 @@ def make_llm_client(config, api_key: Optional[str]):
     raise LLMError(f"unknown llm provider: {provider}")
 
 
+def _gemini_ctx_for(model: str) -> int:
+    """Best-effort context length for known Gemini models (in tokens)."""
+    m = (model or "").lower()
+    if "gemini-2.5-pro" in m or "gemini-1.5-pro" in m:
+        return 2_000_000
+    if "gemini-1.5" in m:
+        return 1_000_000
+    if "gemini-2.5-flash" in m:
+        return 1_000_000
+    return 32_000
+
+
 class GeminiClient:
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -92,6 +104,9 @@ class GeminiClient:
         self.response_chars: int = 0
         self.total_duration_s: float = 0.0
         self.calls: list = []  # list[LLMCall]
+
+    def context_length(self) -> int:
+        return _gemini_ctx_for(self.model)
 
     # ------------------------------------------------------------------
     def generate_json(
@@ -297,6 +312,41 @@ class OpenAICompatClient:
         self.response_chars: int = 0
         self.total_duration_s: float = 0.0
         self.calls: list = []  # list[LLMCall]
+        self._cached_ctx: Optional[int] = None
+
+    def context_length(self, default: int = 8192) -> int:
+        """Best-effort detection of the model's max context window.
+
+        Tries ``GET {base_url}/models`` (OpenAI / llama.cpp / Ollama /
+        vLLM all expose model metadata there).  Falls back to ``default``.
+        """
+        if self._cached_ctx is not None:
+            return self._cached_ctx
+        ctx = default
+        try:
+            r = requests.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=(5.0, 5.0),
+            )
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("data") or data.get("models") or []
+                target_lc = (self.model or "").lower()
+                for item in items:
+                    name = str(item.get("id") or item.get("name") or "").lower()
+                    if name == target_lc or name.endswith(target_lc) or target_lc in name:
+                        meta = item.get("meta") or {}
+                        for key in ("n_ctx_train", "context_length", "ctx", "max_input_tokens"):
+                            v = meta.get(key) or item.get(key)
+                            if isinstance(v, int) and v > 0:
+                                ctx = v
+                                break
+                        break
+        except (requests.RequestException, ValueError) as exc:
+            log.debug("context_length probe failed: %s", exc)
+        self._cached_ctx = ctx
+        return ctx
 
     # ------------------------------------------------------------------
     def generate_json(
