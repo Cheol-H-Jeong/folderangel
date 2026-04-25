@@ -55,6 +55,7 @@ class OrganizeWorker(QtCore.QObject):
                 dry_run=self.dry_run,
                 index_db=self.index_db,
                 progress=_progress,
+                cancel_check=lambda: self._cancel,
             )
             self.finished.emit(op)
         except Exception as exc:
@@ -62,6 +63,7 @@ class OrganizeWorker(QtCore.QObject):
 
     def cancel(self):
         self._cancel = True
+        self.status.emit("취소 중… (현재 작업이 안전하게 멈출 때까지 잠시 대기)")
 
 
 def _stage_from_msg(msg: str) -> str:

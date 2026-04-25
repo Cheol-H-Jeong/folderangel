@@ -23,8 +23,12 @@ def _run_cli(args) -> int:
     config = load_config(paths)
     if args.no_economy:
         config.economy_mode = False
-    if args.provider:
+    if args.provider and args.provider != config.llm_provider:
+        # Switching providers: drop any saved base_url that belonged to the
+        # previous one unless the user also passes --base-url explicitly.
         config.llm_provider = args.provider
+        if not args.base_url:
+            config.llm_base_url = ""
     if args.base_url:
         config.llm_base_url = args.base_url
     if args.model:

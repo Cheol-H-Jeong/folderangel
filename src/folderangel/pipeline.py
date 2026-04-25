@@ -30,6 +30,7 @@ def gather_entries(
     config: Config,
     recursive: bool,
     progress: Optional[ProgressCB] = None,
+    cancel_check=None,
 ) -> list[FileEntry]:
     if progress:
         progress("scan: 폴더 검사 시작", 0.0)
@@ -43,6 +44,8 @@ def gather_entries(
         progress(f"scan: {len(paths)}개 파일 발견", 0.05)
     entries: list[FileEntry] = []
     for idx, p in enumerate(paths, 1):
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("canceled by user")
         if progress:
             progress(f"parse [{idx}/{len(paths)}] {p.name}", idx / max(1, len(paths)))
         try:
@@ -67,9 +70,17 @@ def run(
     index_db: Optional[IndexDB] = None,
     progress: Optional[ProgressCB] = None,
     force_mock: bool = False,
+    cancel_check=None,
 ) -> OperationResult:
     target_root = Path(target_root)
-    entries = gather_entries(target_root, config, recursive, progress)
+
+    def _check():
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError("canceled by user")
+
+    _check()
+    entries = gather_entries(target_root, config, recursive, progress, cancel_check)
+    _check()
 
     client = None
     if not force_mock:
@@ -83,17 +94,24 @@ def run(
 
     if progress:
         if client is not None:
-            progress(f"plan: Gemini ({config.model}) 호출 준비", 0.0)
+            from .config import provider_label
+
+            progress(
+                f"plan: {provider_label(config)} ({config.model}) 호출 준비", 0.0
+            )
         else:
             progress("plan: Mock 휴리스틱 모드", 0.0)
-    planner = Planner(config, gemini=client)
+    planner = Planner(config, gemini=client, cancel_check=cancel_check)
     plan: Plan = planner.plan(entries, progress=progress)
+    _check()
 
     if progress:
         progress(f"plan: 카테고리 {len(plan.categories)}개 결정됨", 0.95)
         progress(f"organize: 파일 이동 시작 ({len(plan.assignments)}개)", 0.0)
     organizer = Organizer(config)
-    op = organizer.execute(target_root, plan, dry_run=dry_run, progress=progress)
+    op = organizer.execute(
+        target_root, plan, dry_run=dry_run, progress=progress, cancel_check=cancel_check
+    )
 
     if client is not None:
         op.llm_usage = LLMUsage(

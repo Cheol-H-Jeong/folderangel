@@ -50,13 +50,30 @@ class Planner:
         self,
         config: Config,
         gemini: Optional[Any] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         # ``gemini`` is named that way for backwards compatibility, but it
         # accepts any object exposing ``generate_json(prompt, *,
-        # heartbeat=None)`` and the usage counters — i.e. either
-        # :class:`GeminiClient` or :class:`OpenAICompatClient`.
+        # heartbeat=None, cancel_check=None)`` and the usage counters —
+        # i.e. either :class:`GeminiClient` or :class:`OpenAICompatClient`.
         self.config = config
         self.gemini = gemini
+        self.cancel_check = cancel_check
+
+    def _llm_call(self, prompt: str, *, heartbeat=None) -> dict:
+        # Helper: every LLM call goes through here so we can attach the
+        # current cancel_check exactly once.  Tolerant of clients that
+        # don't yet support the keyword (legacy custom clients).
+        try:
+            return self.gemini.generate_json(
+                prompt, heartbeat=heartbeat, cancel_check=self.cancel_check
+            )
+        except TypeError:
+            return self.gemini.generate_json(prompt, heartbeat=heartbeat)
+
+    def _check_cancel(self) -> None:
+        if self.cancel_check is not None and self.cancel_check():
+            raise LLMError("canceled by user")
 
     # -----------------------------------------------------------------
     def plan(
@@ -106,15 +123,15 @@ class Planner:
         for idx, batch in enumerate(batches, 1):
             if progress:
                 progress(
-                    f"stage-a [{idx}/{len(batches)}] Gemini 호출 ({len(batch)} 파일)…",
+                    f"stage-a [{idx}/{len(batches)}] LLM 호출 ({len(batch)} 파일)…",
                     (idx - 1) / max(1, len(batches)) * 0.4,
                 )
             prompt = prompts.build_stage_a(batch)
             try:
-                resp = self.gemini.generate_json(
+                resp = self._llm_call(
                     prompt,
                     heartbeat=self._heartbeat_for(
-                        f"stage-a [{idx}/{len(batches)}] Gemini 응답 대기", progress
+                        f"stage-a [{idx}/{len(batches)}] LLM 응답 대기", progress
                     ),
                 )
                 cands = resp.get("candidates") or []
@@ -135,9 +152,9 @@ class Planner:
                 self.config.min_categories,
                 self.config.max_categories,
             )
-            merged = self.gemini.generate_json(
+            merged = self._llm_call(
                 merge_prompt,
-                heartbeat=self._heartbeat_for("stage-merge: Gemini 응답 대기", progress),
+                heartbeat=self._heartbeat_for("stage-merge: LLM 응답 대기", progress),
             )
             categories_raw = merged.get("categories") or []
             if not categories_raw:
@@ -162,7 +179,7 @@ class Planner:
         for idx, batch in enumerate(batches, 1):
             if progress:
                 progress(
-                    f"stage-b [{idx}/{len(batches)}] Gemini 호출 ({len(batch)} 파일)…",
+                    f"stage-b [{idx}/{len(batches)}] LLM 호출 ({len(batch)} 파일)…",
                     0.5 + (idx / max(1, len(batches))) * 0.4,
                 )
             try:
@@ -216,11 +233,11 @@ class Planner:
                 self.config.ambiguity_threshold,
             )
             if progress:
-                progress(f"plan: Gemini 호출 중 ({len(payloads)} 파일)…", -1.0)
-            resp = self.gemini.generate_json(
+                progress(f"plan: LLM 호출 중 ({len(payloads)} 파일)…", -1.0)
+            resp = self._llm_call(
                 prompt,
                 heartbeat=self._heartbeat_for(
-                    f"plan: Gemini 응답 대기 중 ({len(payloads)} 파일)", progress
+                    f"plan: LLM 응답 대기 중 ({len(payloads)} 파일)", progress
                 ),
             )
             cats = resp.get("categories") or []
@@ -240,7 +257,7 @@ class Planner:
         sample = payloads[::step][:cap]
         if progress:
             progress(
-                f"plan-design: 폴더 설계 (Gemini, 샘플 {len(sample)} 파일)…",
+                f"plan-design: 폴더 설계 (LLM, 샘플 {len(sample)} 파일)…",
                 -1.0,
             )
         design_prompt = prompts.build_single_call(
@@ -249,9 +266,9 @@ class Planner:
             self.config.max_categories,
             self.config.ambiguity_threshold,
         )
-        design = self.gemini.generate_json(
+        design = self._llm_call(
             design_prompt,
-            heartbeat=self._heartbeat_for("plan-design: Gemini 응답 대기", progress),
+            heartbeat=self._heartbeat_for("plan-design: LLM 응답 대기", progress),
         )
         categories = design.get("categories") or []
         if not categories:
@@ -264,7 +281,7 @@ class Planner:
         for idx, chunk in enumerate(chunks, 1):
             if progress:
                 progress(
-                    f"plan-assign [{idx}/{len(chunks)}] Gemini 호출 ({len(chunk)} 파일)…",
+                    f"plan-assign [{idx}/{len(chunks)}] LLM 호출 ({len(chunk)} 파일)…",
                     0.3 + 0.6 * (idx / len(chunks)),
                 )
             try:
@@ -297,10 +314,10 @@ class Planner:
             batch, categories_payload, self.config.ambiguity_threshold
         )
         try:
-            resp = self.gemini.generate_json(
+            resp = self._llm_call(
                 prompt,
                 heartbeat=self._heartbeat_for(
-                    f"stage-b: Gemini 응답 대기 ({len(batch)} 파일)", progress
+                    f"stage-b: LLM 응답 대기 ({len(batch)} 파일)", progress
                 ),
             )
         except LLMError as exc:

@@ -196,6 +196,7 @@ class Organizer:
         plan: Plan,
         dry_run: bool = False,
         progress: Optional[ProgressCB] = None,
+        cancel_check=None,
     ) -> OperationResult:
         target_root = Path(target_root).resolve()
         started_at = datetime.now().astimezone()
@@ -286,6 +287,8 @@ class Organizer:
 
         total = max(1, len(plan.assignments))
         for idx, assign in enumerate(plan.assignments, 1):
+            if cancel_check is not None and cancel_check():
+                raise RuntimeError("canceled by user")
             cat_for_msg = next((c for c in plan.categories if c.id == assign.primary_category_id), None)
             cat_label = cat_for_msg.name if cat_for_msg else assign.primary_category_id
             if progress:

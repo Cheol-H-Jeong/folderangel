@@ -157,9 +157,11 @@ class OrganizeView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def refresh_api_badge(self):
+        from ..config import provider_label
+
         key = get_api_key(self.config)
         if key:
-            self.badge_api.setText("Gemini 연결됨")
+            self.badge_api.setText(f"{provider_label(self.config)} 연결됨")
             self.badge_api.setObjectName("Badge")
         else:
             self.badge_api.setText("Mock 모드 (API 키 없음)")
@@ -414,9 +416,9 @@ class SettingsView(QtWidgets.QWidget):
         f.setSpacing(10)
         self.edit_key = QtWidgets.QLineEdit()
         self.edit_key.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.edit_key.setPlaceholderText("sk-… or AIzaSy… (비워두면 Mock 모드)")
+        self.edit_key.setPlaceholderText("API 키를 입력 (비워두면 Mock 모드 — 키 없이 실행)")
         if get_api_key(self.config):
-            self.edit_key.setPlaceholderText("저장된 키 사용 중 — 덮어쓰려면 입력")
+            self.edit_key.setPlaceholderText("저장된 키 사용 중 — 덮어쓰려면 새 키 입력")
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.edit_key, 1)
         btn_save_key = QtWidgets.QPushButton("저장")
@@ -429,12 +431,17 @@ class SettingsView(QtWidgets.QWidget):
         row.addWidget(btn_clear_key)
         wrap = QtWidgets.QWidget()
         wrap.setLayout(row)
-        f.addRow("Gemini API 키", wrap)
+        # Provider-aware label kept in sync via _refresh_api_label().
+        self.lbl_api_key = QtWidgets.QLabel("API 키")
+        f.addRow(self.lbl_api_key, wrap)
 
         # Provider drop-down
         self.cmb_provider = QtWidgets.QComboBox()
         self.cmb_provider.addItem("Gemini (Google AI Studio)", "gemini")
-        self.cmb_provider.addItem("OpenAI 호환 (OpenAI / OpenRouter / Ollama / vLLM …)", "openai_compat")
+        self.cmb_provider.addItem(
+            "OpenAI 호환 (OpenAI / Qwen / Ollama / vLLM / OpenRouter / …)",
+            "openai_compat",
+        )
         for i in range(self.cmb_provider.count()):
             if self.cmb_provider.itemData(i) == self.config.llm_provider:
                 self.cmb_provider.setCurrentIndex(i)
@@ -517,6 +524,9 @@ class SettingsView(QtWidgets.QWidget):
         btn_row.addWidget(btn_save)
         v.addLayout(btn_row)
         v.addStretch(1)
+        # Synchronise the API-key label/placeholder with the current provider.
+        self._refresh_api_label()
+        self.edit_base_url.textChanged.connect(lambda _t: self._refresh_api_label())
 
     def _save_key(self):
         key = self.edit_key.text().strip()
@@ -545,6 +555,20 @@ class SettingsView(QtWidgets.QWidget):
                 self.edit_base_url.setText("https://api.openai.com/v1")
             elif provider == "gemini":
                 self.edit_base_url.setText("")  # use built-in default
+        self._refresh_api_label(provider=provider)
+
+    def _refresh_api_label(self, provider: str | None = None) -> None:
+        if provider is None:
+            provider = self.cmb_provider.currentData() or "gemini"
+        # Build a transient Config with the right provider so provider_label
+        # picks the human-friendly name (Qwen / OpenAI / Ollama / …).
+        from ..config import provider_label
+
+        proxy = type(self.config)()
+        proxy.llm_provider = provider
+        proxy.llm_base_url = self.edit_base_url.text().strip()
+        name = provider_label(proxy)
+        self.lbl_api_key.setText(f"{name} API 키")
 
     def _save(self):
         provider = self.cmb_provider.currentData() or "gemini"

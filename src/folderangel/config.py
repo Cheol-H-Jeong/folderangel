@@ -27,6 +27,35 @@ class AppPaths:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
 
+def provider_label(cfg: "Config") -> str:
+    """Human-friendly name for the currently selected LLM provider.
+
+    Used by the UI, reporter, and CLI so we never hard-code "Gemini" once
+    the user has switched to OpenAI-compatible providers (Qwen / OpenAI /
+    Ollama / OpenRouter / …).
+    """
+    provider = (getattr(cfg, "llm_provider", "gemini") or "gemini").lower()
+    if provider in ("openai_compat", "openai", "compat"):
+        # Try to be a bit more specific from the URL when possible.
+        url = (getattr(cfg, "llm_base_url", "") or "").lower()
+        if "openai.com" in url:
+            return "OpenAI"
+        if "openrouter" in url:
+            return "OpenRouter"
+        if "together" in url:
+            return "Together"
+        if "groq" in url:
+            return "Groq"
+        if "anthropic" in url:
+            return "Anthropic"
+        if "ollama" in url or "localhost" in url or "127.0.0.1" in url:
+            return "로컬 LLM"
+        if "qwen" in url:
+            return "Qwen"
+        return "OpenAI 호환"
+    return "Gemini"
+
+
 def default_paths() -> AppPaths:
     """Pick a platform-appropriate data dir.
 

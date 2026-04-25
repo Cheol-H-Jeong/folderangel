@@ -52,7 +52,10 @@ def make_llm_client(config, api_key: Optional[str]):
     model = getattr(config, "model", "gemini-2.5-flash")
     if provider in ("gemini", "google", "google_ai", ""):
         client = GeminiClient(api_key=api_key, model=model)
-        if base_url:
+        # Only honour an explicit base_url when it actually looks like a
+        # Google generative-language host — otherwise it's almost certainly
+        # a leftover from a previous OpenAI-compat config and would 404.
+        if base_url and ("googleapis.com" in base_url or "google" in base_url):
             client.base_url = base_url.rstrip("/")
         return client
     if provider in ("openai", "openai_compat", "openai-compatible", "compat"):
@@ -89,6 +92,7 @@ class GeminiClient:
         prompt: str,
         temperature: float = 0.2,
         heartbeat: Optional[Callable[[float], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> dict[str, Any]:
         """Send *prompt* to Gemini and parse the JSON reply.
 
@@ -118,6 +122,8 @@ class GeminiClient:
         attempt = 0
         last_exc: Optional[Exception] = None
         while attempt <= self.max_retries:
+            if cancel_check is not None and cancel_check():
+                raise LLMError("canceled by user")
             # Lengthen the read timeout on each retry — the API often just
             # needs more wall-clock time on long batches.
             current_timeout = self.timeout * (1.0 + 0.5 * attempt)
@@ -211,16 +217,18 @@ def _strip_code_fence(text: str) -> str:
 class OpenAICompatClient:
     """Client for any OpenAI Chat Completions compatible API.
 
-    Works against:
-      * OpenAI itself  (base_url ``https://api.openai.com/v1``)
-      * Together / Groq / OpenRouter  (each one's base_url)
-      * Ollama         (``http://localhost:11434/v1``)
-      * vLLM / LM Studio / TGI exposing ``/v1/chat/completions``
-      * Gemini via the OpenAI-compatible proxy
-        (``https://generativelanguage.googleapis.com/v1beta/openai``)
+    Works against OpenAI, OpenRouter, Together, Groq, Ollama (``/v1``),
+    vLLM, LM Studio, TGI, and Gemini's OpenAI-compatible proxy.  Local
+    backends typically take much longer to first-token than hosted ones,
+    so we (a) default to a *very* long read timeout (10 minutes), and
+    (b) request server-sent-event streaming so the connection is kept
+    alive by token chunks — read-timeout only fires if the server stops
+    emitting tokens completely.
 
-    Same shape as :class:`GeminiClient` so the planner doesn't care which
-    one is in use.
+    The caller can supply a ``cancel_check`` callable.  We poll it during
+    the streaming loop and abort the HTTP call as soon as it returns
+    True, so the user's "Cancel" button reflects in real time instead of
+    waiting for the entire timeout.
     """
 
     def __init__(
@@ -228,8 +236,9 @@ class OpenAICompatClient:
         api_key: str,
         model: str,
         base_url: str,
-        timeout: float = 180.0,
+        timeout: float = 600.0,
         max_retries: int = 3,
+        stream: bool = True,
     ) -> None:
         if not api_key:
             raise LLMError("empty api key")
@@ -240,22 +249,25 @@ class OpenAICompatClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
+        self.stream = stream
         self.request_count: int = 0
         self.prompt_chars: int = 0
         self.response_chars: int = 0
 
+    # ------------------------------------------------------------------
     def generate_json(
         self,
         prompt: str,
         temperature: float = 0.2,
         heartbeat: Optional[Callable[[float], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        body = {
+        body: dict[str, Any] = {
             "model": self.model,
             "messages": [
                 {
@@ -267,12 +279,16 @@ class OpenAICompatClient:
             "temperature": temperature,
             "response_format": {"type": "json_object"},
         }
+        if self.stream:
+            body["stream"] = True
 
         self.prompt_chars += len(prompt)
         attempt = 0
         last_exc: Optional[Exception] = None
         while attempt <= self.max_retries:
-            current_timeout = self.timeout * (1.0 + 0.5 * attempt)
+            if cancel_check is not None and cancel_check():
+                raise LLMError("canceled by user")
+            current_timeout = self.timeout * (1.0 + 0.25 * attempt)
             stop_evt = threading.Event()
             start_ts = time.monotonic()
 
@@ -291,34 +307,46 @@ class OpenAICompatClient:
             if heartbeat is not None:
                 beat_thread = threading.Thread(target=_beat, daemon=True)
                 beat_thread.start()
+            resp = None
             try:
                 resp = requests.post(
                     url,
                     headers=headers,
                     json=body,
                     timeout=(15.0, current_timeout),
+                    stream=bool(body.get("stream")),
                 )
                 if resp.status_code >= 400:
+                    text_preview = ""
+                    try:
+                        text_preview = resp.text[:300]
+                    except Exception:
+                        pass
                     if resp.status_code in (429, 500, 502, 503, 504):
                         raise LLMError(
-                            f"openai-compat transient http {resp.status_code}: {resp.text[:200]}"
+                            f"openai-compat transient http {resp.status_code}: {text_preview[:200]}"
                         )
-                    # Retry once without response_format if the server
-                    # rejects that field (some self-hosted backends don't
-                    # implement it yet).
-                    if (
-                        attempt == 0
-                        and resp.status_code == 400
-                        and "response_format" in (resp.text or "")
-                    ):
+                    # Some self-hosted backends reject either the
+                    # ``response_format`` knob or the ``stream`` knob — drop
+                    # them once and retry.
+                    dropped = False
+                    if "response_format" in text_preview:
                         body.pop("response_format", None)
+                        dropped = True
+                    if "stream" in text_preview and body.get("stream"):
+                        body.pop("stream", None)
+                        dropped = True
+                    if dropped and attempt == 0:
                         attempt += 1
                         continue
                     raise LLMError(
-                        f"openai-compat http {resp.status_code}: {resp.text[:300]}"
+                        f"openai-compat http {resp.status_code}: {text_preview}"
                     )
-                data = resp.json()
-                text = _extract_openai_text(data)
+                if body.get("stream"):
+                    text = _consume_openai_stream(resp, cancel_check)
+                else:
+                    data = resp.json()
+                    text = _extract_openai_text(data)
                 self.request_count += 1
                 self.response_chars += len(text)
                 try:
@@ -334,6 +362,9 @@ class OpenAICompatClient:
                     current_timeout,
                     exc,
                 )
+                # Don't keep retrying after an explicit user cancel.
+                if isinstance(exc, LLMError) and "canceled" in str(exc):
+                    raise
                 attempt += 1
                 if attempt <= self.max_retries:
                     time.sleep(min(20.0, 1.5 * (2 ** attempt)))
@@ -342,7 +373,58 @@ class OpenAICompatClient:
                 stop_evt.set()
                 if beat_thread is not None:
                     beat_thread.join(timeout=0.1)
+                if resp is not None:
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
         raise LLMError(f"openai-compat failed after retries: {last_exc}")
+
+
+def _consume_openai_stream(
+    resp: "requests.Response", cancel_check: Optional[Callable[[], bool]]
+) -> str:
+    """Read an OpenAI SSE stream and return the joined text content.
+
+    Each line is ``data: { "choices": [...] }``.  We stop on the special
+    ``data: [DONE]`` marker, on ``finish_reason`` non-null, on user
+    cancel, or on connection close.
+    """
+    out: list[str] = []
+    for raw_line in resp.iter_lines(decode_unicode=True):
+        if cancel_check is not None and cancel_check():
+            try:
+                resp.close()
+            except Exception:
+                pass
+            raise LLMError("canceled by user")
+        if not raw_line:
+            continue
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        try:
+            choice = obj["choices"][0]
+        except (KeyError, IndexError, TypeError):
+            continue
+        delta = choice.get("delta") or {}
+        chunk = delta.get("content")
+        if isinstance(chunk, list):
+            for part in chunk:
+                if isinstance(part, dict):
+                    out.append(part.get("text", ""))
+        elif isinstance(chunk, str):
+            out.append(chunk)
+        if choice.get("finish_reason"):
+            break
+    return "".join(out)
 
 
 def _extract_openai_text(response: dict) -> str:

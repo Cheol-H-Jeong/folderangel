@@ -120,11 +120,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._goto(1)
 
     def _update_status_badge(self):
-        from ..config import get_api_key
+        from ..config import get_api_key, provider_label
 
         key = get_api_key(self.config)
         if key:
-            self.status_badge.setText(f"Gemini: 연결됨\n모델: {self.config.model}")
+            self.status_badge.setText(
+                f"{provider_label(self.config)}: 연결됨\n모델: {self.config.model}"
+            )
         else:
             self.status_badge.setText("Mock 모드\n설정에서 API 키 등록")
 

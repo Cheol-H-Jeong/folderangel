@@ -107,21 +107,34 @@ class LLMUsage:
         return self.response_chars // 3
 
     def estimate_cost_usd(self) -> float:
-        """Rough USD cost estimate based on public Gemini pricing.
+        """Rough USD cost estimate based on public model pricing.
 
         Numbers are *approximate* and meant as a back-of-envelope figure
-        for the report — the actual bill depends on the live Google
+        for the report — the actual bill depends on the live provider
         pricing tier at request time.  Prices below are USD per 1M tokens.
+        Local models (Ollama / vLLM / LM Studio) report 0.
         """
+        m = (self.model or "").lower()
         # (input_per_1m, output_per_1m)
         pricing = {
-            "gemini-2.5-flash":     (0.30, 2.50),
+            "gemini-2.5-flash":      (0.30, 2.50),
             "gemini-2.5-flash-lite": (0.10, 0.40),
-            "gemini-2.5-pro":       (1.25, 10.00),
-            "gemini-1.5-flash":     (0.075, 0.30),
-            "gemini-1.5-pro":       (1.25, 5.00),
+            "gemini-2.5-pro":        (1.25, 10.00),
+            "gemini-1.5-flash":      (0.075, 0.30),
+            "gemini-1.5-pro":        (1.25, 5.00),
+            "gpt-4o-mini":           (0.15, 0.60),
+            "gpt-4o":                (2.50, 10.00),
+            "gpt-4.1-mini":          (0.40, 1.60),
+            "gpt-4.1":               (2.00, 8.00),
+            "claude-3-5-sonnet":     (3.00, 15.00),
+            "claude-3-5-haiku":      (0.80, 4.00),
+            "qwen2.5-72b-instruct":  (0.0, 0.0),
         }
-        in_rate, out_rate = pricing.get(self.model, (0.30, 2.50))
+        # Locally-hosted models: assume free.
+        local_hint = any(
+            tag in m for tag in ("qwen", "llama", "phi", "gemma", "mistral", "mixtral", "deepseek")
+        )
+        in_rate, out_rate = pricing.get(m, (0.0, 0.0) if local_hint else (0.30, 2.50))
         in_tokens = self.estimated_prompt_tokens
         out_tokens = self.estimated_response_tokens
         return (in_tokens / 1_000_000) * in_rate + (out_tokens / 1_000_000) * out_rate
