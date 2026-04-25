@@ -80,31 +80,46 @@ def create_shortcut(target: Path, link_dir: Path, base_name: str | None = None) 
             shutil.copy2(target, link_path)
             return link_path
 
-    # ---- Linux: try a Type=Link .desktop entry first (file managers open
-    # this with the user's MIME default handler exactly as if the file
-    # itself was double-clicked), then fall back to a Type=Application
-    # launcher with an Exec= line, then to a plain symlink.  We pick the
-    # path that the runtime file manager actually accepts.
+    # ---- Linux strategy:
+    # 1) Hard link (``os.link``).  At the kernel level a hardlink is just a
+    #    second directory entry pointing at the same inode, indistinguishable
+    #    from the original file — every file manager double-clicks it
+    #    cleanly with no security gate, no MIME-handler hop, no .desktop
+    #    trust prompt.  Costs no extra disk space.  Only fails when the
+    #    target lives on a different filesystem.
+    # 2) Symbolic link (``os.symlink``).  Used when the hardlink path is
+    #    cross-fs.  Modern Linux file managers (Nautilus / Dolphin / Nemo)
+    #    follow file→file symlinks transparently, but a few setups treat
+    #    them like a sidecar — that's why we prefer hardlink.
+    # 3) ``.desktop`` Type=Link as the last resort.  GNOME Files 43+
+    #    refuses to launch ``.desktop`` files without an explicit "Allow
+    #    Launching" toggle per file, so this is intentionally last.
+    link_path = _unique(link_dir / base)
+    try:
+        os.link(target, link_path)
+        return link_path
+    except OSError as exc:
+        log.debug("hardlink failed (%s) — falling back to symlink", exc)
+
+    try:
+        os.symlink(target, link_path)
+        return link_path
+    except OSError as exc:
+        log.debug("symlink failed (%s) — falling back to .desktop launcher", exc)
+
     desktop_path = _unique(link_dir / f"{base}.desktop")
     try:
         _write_desktop_link(desktop_path, target)
         return desktop_path
     except OSError as exc:
         log.warning("Type=Link .desktop failed (%s); trying Type=Application", exc)
-
     try:
         _write_desktop_application(desktop_path, target)
         return desktop_path
     except OSError as exc:
-        log.warning(".desktop launcher failed (%s); falling back to symlink", exc)
+        log.warning(".desktop launcher failed (%s); copying as final fallback", exc)
 
-    link_path = _unique(link_dir / base)
-    try:
-        os.symlink(target, link_path)
-        return link_path
-    except OSError as exc:
-        log.warning("symlink failed (%s), falling back to copy", exc)
-        shutil.copy2(target, link_path)
+    shutil.copy2(target, link_path)
     return link_path
 
 

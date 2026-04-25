@@ -12,28 +12,35 @@ if not sys.platform.startswith("linux"):
 from folderangel.shortcuts import create_shortcut
 
 
-def test_desktop_launcher_for_file(tmp_path):
+def test_shortcut_is_indistinguishable_from_real_file(tmp_path):
+    """Linux strategy is hardlink → symlink → .desktop fallback.
+
+    For the common case (same filesystem) we must end up with a file
+    that file managers double-click without any trust gate, i.e. a
+    hardlink (preferred) or symlink.  Both share the same inode-data
+    contract: reading the shortcut returns the original bytes.
+    """
     target = tmp_path / "report.pdf"
-    target.write_text("dummy")
+    target.write_bytes(b"hello-fa")
     link_dir = tmp_path / "secondary"
     link_dir.mkdir()
 
     sp = create_shortcut(target, link_dir)
     assert sp.exists()
-    assert sp.suffix == ".desktop"
-    text = sp.read_text(encoding="utf-8")
 
-    # Either of the two valid layouts is acceptable.  We require the file
-    # manager to be able to find the original target either via URL= or via
-    # an Exec= line that includes the absolute target path.
-    assert "Type=Link" in text or "Type=Application" in text
-    assert ("URL=file://" in text) or ("Exec=" in text)
-    assert str(target) in text
-    assert "Name=report.pdf" in text
-
-    # Must be executable so file managers treat it as a launcher
-    mode = sp.stat().st_mode
-    assert mode & stat.S_IXUSR
+    # On any healthy single-fs Linux box this should be a hardlink (or
+    # at worst a symlink), NOT a .desktop file — those need a per-file
+    # "Allow Launching" toggle in modern GNOME and break double-click.
+    assert sp.suffix != ".desktop", (
+        f"on this environment we landed on a .desktop fallback ({sp}); "
+        "GNOME Files refuses to launch those without explicit user trust, "
+        "so the shortcut would not work on double-click"
+    )
+    # Bytes must match the original (works for hardlink and symlink).
+    assert sp.read_bytes() == b"hello-fa"
+    # And modifying the original is reflected — proves the link contract.
+    target.write_bytes(b"hello-fa-v2")
+    assert sp.read_bytes() == b"hello-fa-v2"
 
 
 def test_unique_naming_avoids_overwrite(tmp_path):
