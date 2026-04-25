@@ -632,28 +632,48 @@ def _closest_category(unknown_id: str, categories: list[dict]) -> str:
 
 def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
     by_path = {str(e.path): e for e in entries}
+    from .llm.client import _looks_like_mojibake, _try_repair_mojibake
+
     cats: list[Category] = []
     for c in data.get("categories", []):
         try:
             group_val = int(c.get("group", 0) or 0)
         except (TypeError, ValueError):
             group_val = 0
-        # Force a numeric group on every category so naming stays consistent.
-        # 0/missing → 9 (catch-all bucket); valid range is 1..9.
         if group_val < 1 or group_val > 9:
             group_val = 9
-        # Defensive: filter out garbage LLM output before it reaches disk.
         raw_name = str(c.get("name") or c.get("id") or "").strip()
-        # Drop anything containing the Unicode replacement char or BOM —
-        # those signal a truncated UTF-8 sequence.
+        raw_desc = str(c.get("description", "") or "")
+
+        # Per-field mojibake detection + best-effort repair.  This must be
+        # strict because only a single category may be corrupt in an
+        # otherwise clean response — the document-level check would miss it.
+        if _looks_like_mojibake(raw_name, strict=True):
+            repaired = _try_repair_mojibake(raw_name, strict=True)
+            if not _looks_like_mojibake(repaired, strict=True) and repaired != raw_name:
+                log.info("repaired mojibake category name: %r → %r", raw_name, repaired)
+                raw_name = repaired
+            else:
+                log.warning(
+                    "dropping category with mojibake name we cannot repair: %r",
+                    raw_name,
+                )
+                continue
+        if _looks_like_mojibake(raw_desc, strict=True):
+            raw_desc = _try_repair_mojibake(raw_desc, strict=True)
+            if _looks_like_mojibake(raw_desc, strict=True):
+                raw_desc = ""  # don't write garbage to the report
+
+        # Replacement char / BOM checks are still a hard reject.
         if any(ch in raw_name for ch in ("�", "﻿")):
-            log.warning("dropping category with corrupt name (mojibake): %r", raw_name)
+            log.warning("dropping category with corrupt name: %r", raw_name)
             continue
+
         cats.append(
             Category(
                 id=str(c.get("id") or "").strip() or raw_name[:24] or f"cat-{len(cats)+1}",
                 name=raw_name or str(c.get("id") or ""),
-                description=str(c.get("description", "") or ""),
+                description=raw_desc,
                 time_label=str(c.get("time_label", "") or "").strip(),
                 group=group_val,
             )

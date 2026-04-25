@@ -719,37 +719,68 @@ def _consume_openai_stream(
     return "".join(out)
 
 
-_MOJIBAKE_HINTS = ("ì", "ë", "Ã", "â\x80", "â\x82", "ï¿½")
+_MOJIBAKE_HINTS = ("ì", "ë", "Ã", "â\x80", "â\x82", "ï¿½", "ê", "í", "ï")
 
 
-def _looks_like_mojibake(text: str) -> bool:
+def _looks_like_mojibake(text: str, *, strict: bool = False) -> bool:
     """Heuristic: did UTF-8 get decoded as Latin-1 somewhere upstream?
 
-    We look for the canonical telltale chars (``ì`` / ``ë`` / ``Ã``) and
-    require enough of them to dwarf the legitimate non-ASCII content.
+    Two threshold modes:
+      * default — applied to long bodies (full response).  Requires 3+
+        markers AND density ≥ 1% of total length, so a short proper-name
+        with a couple of high-Latin chars doesn't false-trigger.
+      * strict — applied to short fields (e.g. a single category name).
+        Lower bar so a 30-char folder name with 4 mojibake markers
+        trips even though the same density vs a 2 000-char body would
+        not.  Required when scanning per-field, not whole-document.
     """
     if not text:
         return False
     hits = sum(text.count(t) for t in _MOJIBAKE_HINTS)
+    if strict:
+        # Short fields: any 3 markers within 60 chars, OR ≥ 25 % density,
+        # is enough.
+        if hits >= 3:
+            return True
+        return len(text) > 0 and (hits / max(1, len(text))) >= 0.25
     if hits < 3:
         return False
-    # If a meaningful fraction of the text is mojibake markers we treat the
-    # whole thing as broken.
     return hits >= max(3, len(text) * 0.01)
 
 
-def _try_repair_mojibake(text: str) -> str:
-    """Best-effort: re-encode as Latin-1, decode as UTF-8.  No-op on failure."""
-    if not _looks_like_mojibake(text):
+def _try_repair_mojibake(text: str, *, strict: bool = False) -> str:
+    """Best-effort: re-encode as Latin-1, decode as UTF-8.  No-op on failure.
+
+    With ``strict=True`` we additionally accept a relaxed UTF-8 decode
+    (errors="replace") for short fields where strict round-trip fails
+    on a single bad continuation byte but most of the field is
+    salvageable.
+    """
+    if not _looks_like_mojibake(text, strict=strict):
         return text
     try:
         repaired = text.encode("latin-1", errors="strict").decode("utf-8", errors="strict")
-        # Only accept the repair if it actually reduced the mojibake load.
-        if not _looks_like_mojibake(repaired):
-            log.info("repaired latin-1/UTF-8 mojibake in LLM response")
+        if not _looks_like_mojibake(repaired, strict=strict):
+            log.info("repaired latin-1/UTF-8 mojibake (strict round-trip)")
             return repaired
     except (UnicodeEncodeError, UnicodeDecodeError):
         pass
+    if strict:
+        # Last resort for short fields: tolerate a couple of replacement
+        # chars instead of throwing the whole name away.
+        try:
+            relaxed = text.encode("latin-1", errors="replace").decode(
+                "utf-8", errors="replace"
+            )
+            # Accept only if the relaxed repair actually reduced markers.
+            if (
+                not _looks_like_mojibake(relaxed, strict=strict)
+                and "�" not in relaxed
+            ):
+                log.info("repaired latin-1/UTF-8 mojibake (relaxed)")
+                return relaxed
+        except Exception:  # pragma: no cover
+            pass
     return text
 
 

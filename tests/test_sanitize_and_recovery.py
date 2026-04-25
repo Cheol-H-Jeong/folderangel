@@ -48,3 +48,42 @@ def test_recover_simple_truncation():
 def test_recover_preserves_existing_valid_json():
     text = '{"a": 1, "b": [1,2,3]}'
     assert _recover_truncated_json(text) == text
+
+
+def test_user_reported_latin1_mojibake_folder_name_is_rejected():
+    """Exact string the user saw on disk: should never reach the
+    filesystem.  Per-field strict mojibake check must catch it."""
+    bad = "íì ë¶ ì´ê±°ë AI ê³µíµê¸°ë° BPR_ISP"
+    out = sanitize_folder_name(bad)
+    assert out == "folder", f"mojibake leaked through sanitiser: {out!r}"
+
+
+def test_planner_drops_mojibake_category_in_otherwise_clean_response():
+    """The leak path: only one of several category names is mojibake."""
+    from pathlib import Path
+    from folderangel.models import FileEntry
+    from folderangel.planner import _plan_from_dict
+    from datetime import datetime
+
+    now = datetime.now().astimezone()
+    entries = [
+        FileEntry(
+            path=Path("/tmp/a.md"), name="a.md", ext=".md",
+            size=1, created=now, modified=now, accessed=now,
+        )
+    ]
+    plan_dict = {
+        "categories": [
+            {"id": "good", "name": "한국지역정보개발원 제안사업", "group": 1},
+            {"id": "bad", "name": "íì ë¶ ì´ê±°ë AI ê³µíµê¸°ë° BPR_ISP", "group": 1},
+        ],
+        "assignments": [
+            {"path": "/tmp/a.md", "primary": "good", "primary_score": 0.9}
+        ],
+    }
+    plan = _plan_from_dict(plan_dict, entries)
+    names = [c.name for c in plan.categories]
+    assert any("한국지역정보개발원" in n for n in names)
+    assert not any("íì" in n for n in names), (
+        f"mojibake category survived: {names!r}"
+    )

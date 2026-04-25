@@ -66,6 +66,21 @@ just the unit tests.
   filesystem or shell.**  Strip control chars, replacement char (`�`),
   BOM, JSON-key leakage (`"name":"…`), Windows reserved names.  Reject
   values with fewer than ~2 visible characters.
+- **B4a. Encoding/mojibake detection MUST run per-field, not only on
+  the whole response.**  A 2 000-char body where only one 30-char name
+  is corrupt won't trip a "≥ 1 % markers" document-level threshold.
+  Every user-visible string field (folder name, title, label, path
+  segment) needs its own *strict* mojibake check after JSON parsing
+  and BEFORE it reaches disk / UI.  Provide a per-field repair
+  attempt (`encode('latin-1').decode('utf-8')` strict, then relaxed)
+  and drop the field if repair fails.  Document-level checks remain
+  useful for hard-fail short-circuiting but are not sufficient.
+- **B4b. Defence in depth at every boundary.**  Encoding/mojibake/
+  control-char checks belong at *each* layer that handles the value:
+  (1) at receive (HTTP client), (2) at parse (planner / mapper),
+  (3) at write (filesystem / DB sanitiser).  Any single layer's check
+  can be bypassed by a value that slips through earlier; redundancy
+  is the design.
 - **B5. Pin auth / config sources explicitly.**  When a CLI flag changes
   the provider/host, also reset stale fields that belonged to the old
   provider (e.g. base_url) unless explicitly carried over.
@@ -116,6 +131,8 @@ just the unit tests.
 - **D2. Always strip mojibake / replacement chars / BOM from any
   externally-supplied name** (LLM, scraped data, user paste).  Fall
   back to a safe placeholder if cleaning leaves < 2 visible chars.
+  The strip pass must check the *individual* name (see B4a) — a clean
+  total response is no guarantee that every field is clean.
 - **D3. Order on disk should match the LLM's grouping intent.**  If the
   model proposed `group` numbers (relevance buckets), the prefix lets
   file managers sort by name and reproduce that grouping.

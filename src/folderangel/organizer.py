@@ -84,6 +84,13 @@ def sanitize_folder_name(name: str, fallback: str = "folder") -> str:
     visible = re.sub(r"[\W_]+", "", cleaned)
     if len(visible) < 2:
         return fallback
+    # Last-line defence against mojibake making it this far (e.g. user
+    # passes a hand-crafted Category): if more than 25 % of the chars are
+    # canonical Latin-1-of-UTF-8 markers, refuse the name.
+    from .llm.client import _looks_like_mojibake
+
+    if _looks_like_mojibake(cleaned, strict=True):
+        return fallback
     return cleaned[:120]
 
 
