@@ -205,8 +205,41 @@ class Planner:
             "chars": 0,
             "preview": "",
             "warned": False,
-            "buffer": "",   # rolling tail to recover whole chars across chunks
+            "buffer": "",        # rolling tail to recover whole chars across chunks
+            "last_emit_ts": 0.0,
+            "last_shown": "",
         }
+
+        import re as _re
+        # Cosmetic-only filter: strip JSON syntax noise that makes the
+        # streaming preview look like an encoding error to a human even
+        # though the underlying data is fine.  We never mutate the
+        # data we send to json.loads — this only affects what's shown
+        # in the progress log.
+        _json_noise = _re.compile(
+            r'(?:\\["nrtu/]|\\u[0-9A-Fa-f]{0,4}|[{}\[\]"\\]|,\s*|:\s*)+'
+        )
+        _ws = _re.compile(r"\s+")
+
+        def _humanise_preview(window: str) -> str:
+            t = window.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+            t = _json_noise.sub(" ", t)
+            t = "".join(ch if ch.isprintable() else " " for ch in t)
+            t = _ws.sub(" ", t).strip()
+            # Last 80 chars are enough to feel "alive" without crowding
+            # the log line with stale tokens.
+            if len(t) > 80:
+                t = "…" + t[-80:]
+            return t
+
+        import time as _time
+
+        # The token preview line only needs to *feel* alive, not flicker.
+        # Throttle UI updates to once every ~1.5 s, and skip emits when
+        # the visible portion hasn't actually changed.  The character
+        # counter itself is always carried in the line so the user can
+        # still see progress.
+        _MIN_EMIT_INTERVAL = 1.5
 
         def _on_stream(chunk: str, total: int):
             stream_state["chars"] = total
@@ -214,33 +247,32 @@ class Planner:
                 return
             from .llm.client import _looks_like_mojibake
 
-            # Build a sliding window of the last ~120 visible chars so
-            # the user can actually see what the model is generating.
-            stream_state["buffer"] = (stream_state["buffer"] + chunk)[-160:]
+            stream_state["buffer"] = (stream_state["buffer"] + chunk)[-200:]
             window = stream_state["buffer"]
 
             if _looks_like_mojibake(window, strict=True):
-                # Replace the visible part with a redacted placeholder so we
-                # don't show garbage to the user, but keep the count moving
-                # and warn once per call.
                 if not stream_state["warned"]:
                     stream_state["warned"] = True
                     progress(
                         "⚠ 응답이 모지바케로 보입니다 — 서버 chat template 또는 양자화 모델 호환 문제일 수 있습니다.",
                         -1.0,
                     )
-                shown = "●" * min(40, len(window))
+                shown = "●" * 40
             else:
-                # Sanitise for the log line: collapse whitespace and JSON
-                # whitespace artefacts, but keep Korean/English content.
-                shown = window.replace("\n", " ").replace("\r", " ").replace("\t", " ")
-                # Also strip lone backslashes / surrogates that look ugly
-                # in the toast — purely cosmetic, never alters data.
-                shown = "".join(ch if ch.isprintable() else " " for ch in shown).strip()
-                if len(shown) > 120:
-                    shown = shown[-120:]
+                shown = _humanise_preview(window)
 
-            progress(f"{stream_label}: {total}자 수신 중 — …{shown}", -1.0)
+            now = _time.monotonic()
+            if (
+                now - stream_state["last_emit_ts"] < _MIN_EMIT_INTERVAL
+                and shown == stream_state["last_shown"]
+            ):
+                # Visually identical line within the throttle window —
+                # skip to avoid the per-second flicker the user
+                # complained about.
+                return
+            stream_state["last_emit_ts"] = now
+            stream_state["last_shown"] = shown
+            progress(f"{stream_label}: {total}자 수신 중 — {shown}", -1.0)
 
         try:
             return self.gemini.generate_json(
@@ -829,11 +861,21 @@ class Planner:
 
     # ------------------------------------------------------------------
     def _heartbeat_for(self, label: str, progress: Optional[ProgressCB]):
-        """Build a heartbeat callback that streams ``label … Ns`` lines."""
+        """Build a heartbeat callback that streams ``label … Ns`` lines.
+
+        We only emit when the integer-second value advances by ≥ 3 to
+        keep the live-status line from re-rendering every single second
+        (the user reported a "flickering" effect).  The first beat
+        always fires so the user sees the call started.
+        """
         if progress is None:
             return None
+        state = {"last": -10.0}
 
         def _beat(elapsed: float):
+            if elapsed - state["last"] < 3.0:
+                return
+            state["last"] = elapsed
             progress(f"{label} … {elapsed:.0f}s 경과", -1.0)
 
         return _beat

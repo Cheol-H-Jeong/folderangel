@@ -59,6 +59,60 @@ def test_live_status_collapses_heartbeat_and_token_stream(tmp_path, monkeypatch)
     assert sum(1 for l in rows if "2s 경과" in l) == 0
 
 
+def test_token_stream_preview_strips_json_noise(tmp_path, monkeypatch):
+    """Streaming preview must show readable Korean + meaningful tokens,
+    not JSON syntax (\\", {, [, : , ,) — that's what the user saw as
+    'looks like an error message'."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    from PySide6 import QtWidgets
+    from folderangel.config import Config, default_paths, load_config
+    from folderangel.planner import Planner
+
+    paths = default_paths(); paths.ensure()
+    cfg = load_config(paths)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    p = Planner(cfg, gemini=None)
+    seen: list[str] = []
+
+    # Synthesise an _on_stream by going through a fake LLMCall: easier
+    # to reach the helper by calling the closure builder used by
+    # _llm_call.  We instead re-import the closure's helper directly.
+    # The behaviour is exposed via a real Planner stream via _on_stream
+    # which is created inside _llm_call.  Simulate that flow by
+    # invoking the public API with a fake client.
+    class _Fake:
+        def generate_json(self, prompt, *, heartbeat=None,
+                          cancel_check=None, stream_text=None):
+            if stream_text:
+                stream_text(
+                    'partial: {"categories":[{"id":"alpha"}],"reason":"…"}',
+                    52,
+                )
+            return {"categories": [{"id": "alpha", "name": "Alpha", "group": 1}],
+                    "assignments": []}
+
+    p.gemini = _Fake()
+    progress = lambda msg, _pct: seen.append(msg)
+    # Drive a single _llm_call via the planner.
+    p._llm_call("hi",
+                heartbeat=None,
+                stream_label="plan 토큰 수신 (5 파일)",
+                progress=progress)
+
+    stream_lines = [m for m in seen if "토큰 수신" in m]
+    assert stream_lines, "no streaming preview emitted"
+    last = stream_lines[-1]
+    # Split off the header ("plan … 52자 수신 중 — ") and inspect only
+    # the body portion that came from the LLM stream.
+    body = last.split("—", 1)[1]
+    for ch in ['{', '}', '[', ']', '\\"']:
+        assert ch not in body, f"JSON noise {ch!r} leaked into preview: {last!r}"
+    # Korean / Latin words from the stream should still be visible.
+    assert "alpha" in body or "categories" in body
+
+
 def test_mainwindow_builds(tmp_path, monkeypatch):
     # Point XDG/HOME-like paths at tmp
     monkeypatch.setenv("HOME", str(tmp_path))
