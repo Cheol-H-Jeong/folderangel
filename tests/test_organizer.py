@@ -80,6 +80,53 @@ def test_shortcut_created_for_secondary(tmp_path):
     assert op.total_shortcuts >= 1
 
 
+def test_humanise_skip_reason_filenotfound_uses_korean():
+    from folderangel.organizer import _humanise_skip_reason
+    p = Path("/tmp/missing/file.pdf")
+    out = _humanise_skip_reason(FileNotFoundError(p), p)
+    assert "사라짐" in out and "/tmp/missing" not in out  # not raw path
+
+
+def test_organizer_recovers_moved_source_by_basename(tmp_path):
+    """If the recorded source is gone but the same file exists
+    elsewhere under target_root, organizer should find and move it
+    instead of skipping."""
+    from folderangel.config import Config
+    from folderangel.models import Assignment, Category, Plan
+    from folderangel.organizer import Organizer
+
+    real = tmp_path / "actual" / "report.pdf"
+    real.parent.mkdir()
+    real.write_text("doc")
+    stale = tmp_path / "stale" / "report.pdf"  # never existed
+
+    cats = [Category(id="c", name="Reports", group=1)]
+    op = Organizer(Config()).execute(
+        tmp_path,
+        Plan(cats, [Assignment(file_path=stale, primary_category_id="c", primary_score=0.9)]),
+    )
+    assert op.total_moved == 1
+    assert op.total_skipped == 0
+    moved = op.moved[0]
+    assert moved.new_path.name == "report.pdf"
+    assert moved.new_path.exists()
+
+
+def test_organizer_dedups_duplicate_assignments(tmp_path):
+    from folderangel.config import Config
+    from folderangel.models import Assignment, Category, Plan
+    from folderangel.organizer import Organizer
+
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    cats = [Category(id="c", name="Docs", group=1)]
+    a1 = Assignment(file_path=f, primary_category_id="c", primary_score=0.9)
+    a2 = Assignment(file_path=f, primary_category_id="c", primary_score=0.9)
+    op = Organizer(Config()).execute(tmp_path, Plan(cats, [a1, a2]))
+    assert op.total_moved == 1
+    assert op.total_skipped == 0
+
+
 def test_compose_folder_name_per_duration():
     from folderangel.organizer import compose_folder_name
 

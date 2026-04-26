@@ -181,6 +181,88 @@ def parse_xlsx(path: Path, max_chars: int) -> str:
     return _cap(chunks, max_chars)
 
 
+def parse_legacy_office(path: Path, max_chars: int) -> str:
+    """Best-effort text scrape from legacy binary Office formats
+    (``.doc`` / ``.ppt`` / ``.pps`` / ``.xls``).  We don't try to fully
+    decode the formats — indexing only needs *some* text from the
+    cover page or first sheet — so we open the OLE compound storage
+    via ``olefile`` and pick out long printable runs from the streams
+    most likely to carry user text.
+    """
+    try:
+        import olefile  # type: ignore
+    except ImportError:
+        return ""
+    try:
+        if not olefile.isOleFile(str(path)):
+            return ""
+        ole = olefile.OleFileIO(str(path))
+    except Exception as exc:
+        log.debug("legacy ole open failed %s: %s", path, exc)
+        return ""
+
+    # Stream names that typically contain readable text per format.
+    candidates = {
+        ".doc": ("WordDocument", "1Table", "0Table"),
+        ".ppt": ("PowerPoint Document", "Pictures"),
+        ".pps": ("PowerPoint Document", "Pictures"),
+        ".xls": ("Workbook", "Book"),
+    }.get(path.suffix.lower(), ())
+    chunks: list[str] = []
+    total = 0
+    try:
+        for entry in ole.listdir(streams=True):
+            if not entry:
+                continue
+            top = entry[0]
+            if candidates and top not in candidates:
+                continue
+            try:
+                with ole.openstream("/".join(entry)) as s:
+                    raw = s.read(64 * 1024)
+            except Exception:
+                continue
+            text = _scrape_printable_from_bytes(raw)
+            if not text:
+                continue
+            chunks.append(text)
+            total += len(text)
+            if total >= max_chars:
+                break
+    finally:
+        try:
+            ole.close()
+        except Exception:
+            pass
+    return _cap(chunks, max_chars)
+
+
+_PRINTABLE_RX = __import__("re").compile(
+    r"[\x20-\x7e가-힣ㄱ-ㆎ一-鿿\s·…\-\.,\(\)\[\]\{\}\"\'‘’“”!?:;#&@/]+"
+)
+
+
+def _scrape_printable_from_bytes(data: bytes) -> str:
+    """Scrape readable Korean / English runs from a raw binary stream.
+
+    Tries UTF-16-LE first (common for modern .doc/.ppt) then CP949 /
+    EUC-KR (common for older Korean files), then Latin-1 as a last
+    resort.  Filters out short noise runs to avoid OLE structure bytes.
+    """
+    encodings = ("utf-16-le", "cp949", "euc-kr", "latin-1")
+    best = ""
+    for enc in encodings:
+        try:
+            decoded = data.decode(enc, errors="ignore")
+        except Exception:
+            continue
+        runs = _PRINTABLE_RX.findall(decoded)
+        text = "\n".join(r.strip() for r in runs if len(r.strip()) >= 4)
+        if len(text) > len(best):
+            best = text
+    return best
+
+
 def parse_odt(path: Path, max_chars: int) -> str:
     try:
         with zipfile.ZipFile(path) as z:

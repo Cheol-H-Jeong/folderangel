@@ -230,6 +230,53 @@ def _set_dir_mtime(path: Path, dt: datetime) -> None:
         log.debug("set mtime failed for %s: %s", path, exc)
 
 
+def _find_by_basename(root: Path, name: str) -> Optional[Path]:
+    """Walk ``root`` looking for a file named exactly ``name``.
+
+    Used to recover assignments whose recorded source path went stale
+    between scan and apply (e.g. a prior organise pass moved the file
+    elsewhere).  Returns the first match — multiple matches are a
+    different problem the caller already handles via ``_unique_path``.
+    """
+    if not root.is_dir():
+        return None
+    for p in root.rglob(name):
+        try:
+            if p.is_file():
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _humanise_skip_reason(exc: BaseException, path: Path) -> str:
+    """Convert a raw exception into the kind of one-line label a user
+    actually wants to see in the skip column.
+
+    For ``FileNotFoundError`` ``str(exc)`` is just the path; for
+    ``KeyError`` it's a quoted token.  Both look like garbage in a
+    "사유" column.  Map known cases to plain Korean and fall back to a
+    ``Type: message`` form for everything else.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return "원본 파일이 사라짐 (다른 작업이 옮겼거나 삭제했음)"
+    if isinstance(exc, PermissionError):
+        return "권한 부족 (읽기/쓰기 권한 없음)"
+    if isinstance(exc, IsADirectoryError):
+        return "대상 위치가 폴더로 이미 존재"
+    if isinstance(exc, FileExistsError):
+        return "동일 이름이 이미 존재 (덮어쓰기 회피)"
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in (28,):  # ENOSPC
+        return "디스크 공간 부족"
+    if isinstance(exc, KeyError):
+        return f"분류 카테고리를 찾지 못함 ({exc.args[0] if exc.args else '?'})"
+    msg = str(exc).strip()
+    # Avoid using the bare path as the message — it looks like data.
+    if msg == str(path) or not msg:
+        return f"{type(exc).__name__}"
+    return f"{type(exc).__name__}: {msg}"
+
+
 def _safe_mtime(path: Path) -> Optional[float]:
     try:
         return path.stat().st_mtime
@@ -370,9 +417,17 @@ class Organizer:
         used_category_ids: set[str] = set()
 
         total = max(1, len(plan.assignments))
+        seen_paths: set[Path] = set()
         for idx, assign in enumerate(plan.assignments, 1):
             if cancel_check is not None and cancel_check():
                 raise RuntimeError("canceled by user")
+            # Dedup: a Plan that lists the same file twice should not
+            # try to move it twice (the second attempt would always
+            # fail with FileNotFoundError because the first move just
+            # consumed it).
+            if assign.file_path in seen_paths:
+                continue
+            seen_paths.add(assign.file_path)
             cat_for_msg = next((c for c in plan.categories if c.id == assign.primary_category_id), None)
             cat_label = cat_for_msg.name if cat_for_msg else assign.primary_category_id
             if progress:
@@ -403,10 +458,22 @@ class Organizer:
                             except FileNotFoundError:
                                 continue
             except Exception as exc:
-                log.warning("organize failed for %s: %s", assign.file_path, exc)
+                # Map low-level exceptions to a human-readable reason
+                # instead of raw ``str(exc)`` (which for FileNotFoundError
+                # is just the path — looks like a column-misalignment in
+                # the report).  Fall back to the exception class name +
+                # message when nothing matches.
+                reason = _humanise_skip_reason(exc, assign.file_path)
+                log.warning(
+                    "organize failed for %s: %s (%s)",
+                    assign.file_path, reason, type(exc).__name__,
+                )
                 if progress:
-                    progress(f"  ⚠ 스킵: {assign.file_path.name} ({exc})", idx / total)
-                skipped.append(SkippedFile(path=assign.file_path, reason=str(exc)))
+                    progress(
+                        f"  ⚠ 스킵: {assign.file_path.name} — {reason}",
+                        idx / total,
+                    )
+                skipped.append(SkippedFile(path=assign.file_path, reason=reason))
 
         # Adopt files that were already sitting inside a (now reused) category
         # folder.  These don't need to be moved, but we record them so the
@@ -634,7 +701,18 @@ class Organizer:
     ) -> Optional[MovedFile]:
         src = assign.file_path
         if not src.exists():
-            raise FileNotFoundError(src)
+            # The recorded path is stale — most often because an
+            # earlier organise pass (or the user themselves) moved the
+            # file in between scan and apply.  Don't skip on this
+            # alone: try to find the same file by basename anywhere
+            # under the target root and continue with that.
+            recovered = _find_by_basename(target_root, src.name)
+            if recovered is None:
+                raise FileNotFoundError(src)
+            log.info(
+                "recovered moved source: %s → %s (basename match)", src, recovered,
+            )
+            src = recovered
 
         cat_id = assign.primary_category_id
         if cat_id not in dir_for:
@@ -660,7 +738,26 @@ class Organizer:
 
         new_path = _unique_path(target_path)
         if not dry_run:
-            shutil.move(str(src), str(new_path))
+            try:
+                shutil.move(str(src), str(new_path))
+            except FileExistsError:
+                # Race: someone created the destination between our
+                # ``_unique_path`` check and the move.  Recompute and try
+                # exactly once more.
+                new_path = _unique_path(target_path)
+                shutil.move(str(src), str(new_path))
+            except OSError as exc:
+                # Cross-device rename can fail on some filesystems even for
+                # shutil.move — fall back to an explicit copy + remove.
+                if getattr(exc, "errno", None) in (18, 39):  # EXDEV / ENOTEMPTY
+                    primary_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(src), str(new_path))
+                    try:
+                        src.unlink()
+                    except OSError:
+                        pass
+                else:
+                    raise
 
         shortcut_paths: list[Path] = []
         # Only create shortcuts for secondary categories whose score is close enough.

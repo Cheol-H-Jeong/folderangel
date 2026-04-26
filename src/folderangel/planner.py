@@ -30,6 +30,82 @@ def _batched(items: list, size: int):
         yield items[i : i + size]
 
 
+def _parse_time_label_range(label: str):
+    """Parse a Category.time_label into ``(start, end)`` ``date`` pair.
+
+    Recognises::
+        "2024"          → 2024-01-01 .. 2024-12-31
+        "2024-Q1"       → 2024-01-01 .. 2024-03-31
+        "2024-H1"       → 2024-01-01 .. 2024-06-30
+        "2024-03"       → 2024-03-01 .. 2024-03-31
+        "2023–2025"     → 2023-01-01 .. 2025-12-31
+        "2023~2025"     → same
+        "2023-2025"     → same (only when both are 4-digit years)
+    """
+    import re as _re
+    from datetime import date
+
+    s = (label or "").strip()
+    if not s:
+        return None
+    m = _re.fullmatch(r"(\d{4})[\-–~](\d{4})", s)
+    if m:
+        y1, y2 = int(m.group(1)), int(m.group(2))
+        if y1 <= y2 <= 9999:
+            return date(y1, 1, 1), date(y2, 12, 31)
+    m = _re.fullmatch(r"(\d{4})-Q([1-4])", s)
+    if m:
+        y, q = int(m.group(1)), int(m.group(2))
+        m0 = (q - 1) * 3 + 1
+        last_day = [31, 31, 30, 30][q - 1] if False else 31  # safe upper
+        return date(y, m0, 1), date(y, m0 + 2, 28)
+    m = _re.fullmatch(r"(\d{4})-H([12])", s)
+    if m:
+        y, h = int(m.group(1)), int(m.group(2))
+        return (date(y, 1, 1), date(y, 6, 30)) if h == 1 else (date(y, 7, 1), date(y, 12, 31))
+    m = _re.fullmatch(r"(\d{4})-(\d{1,2})", s)
+    if m:
+        y, mo = int(m.group(1)), max(1, min(12, int(m.group(2))))
+        return date(y, mo, 1), date(y, mo, 28)
+    m = _re.fullmatch(r"(\d{4})", s)
+    if m:
+        y = int(m.group(1))
+        return date(y, 1, 1), date(y, 12, 31)
+    return None
+
+
+def _guess_by_time(entry, cats):
+    """Pick the project category whose time-window covers the file's
+    modified date.  Returns the category id, or ``None`` if nothing
+    matches (in which case the caller falls back to misc).
+
+    Only project-style categories are considered — anything tagged as
+    the catch-all ``misc`` is excluded.  When several windows match,
+    the *narrowest* (shortest span in days) wins, since burst /
+    short-period buckets are stronger evidence than a multi-year
+    umbrella programme.
+    """
+    try:
+        d = entry.modified.date()
+    except Exception:
+        return None
+    best = None
+    best_span = None
+    for c in cats:
+        if c.id == "misc":
+            continue
+        rng = _parse_time_label_range(c.time_label or "")
+        if rng is None:
+            continue
+        start, end = rng
+        if start <= d <= end:
+            span = (end - start).days
+            if best is None or span < best_span:
+                best = c.id
+                best_span = span
+    return best
+
+
 def _safe_path_repr(path_str: str, is_mojibake) -> str:
     """Redact pre-existing mojibake folder names from a path before we
     show it to the LLM.
@@ -807,19 +883,51 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
             )
         )
 
-    # Ensure every entry has an assignment — fallback to misc for any missed.
-    covered = {a.file_path for a in assignments}
+    # Ensure every entry has an assignment.  For misses (or assignments
+    # the LLM dropped to "misc") we make a *project-time* attempt first:
+    # if a project category's time_label range contains the file's
+    # modified date, place the file there with reason="시기로 추정".
+    # Only files that match no project bucket fall to actual 기타.
+    covered_paths = {a.file_path for a in assignments}
     for entry in entries:
-        if entry.path in covered:
+        if entry.path in covered_paths:
             continue
-        assignments.append(
-            Assignment(
-                file_path=entry.path,
-                primary_category_id="misc",
-                primary_score=0.3,
-                secondary=[],
-                reason="플랜에서 누락되어 기타로 분류",
+        guess = _guess_by_time(entry, cats)
+        if guess is not None:
+            assignments.append(
+                Assignment(
+                    file_path=entry.path,
+                    primary_category_id=guess,
+                    primary_score=0.45,
+                    secondary=[],
+                    reason="시기로 추정 (사업 기간 일치)",
+                )
             )
-        )
+        else:
+            assignments.append(
+                Assignment(
+                    file_path=entry.path,
+                    primary_category_id="misc",
+                    primary_score=0.3,
+                    secondary=[],
+                    reason="명확한 단서 없음 — 기타로 분류",
+                )
+            )
+
+    # Also rescue LLM-supplied "misc" assignments when their modified
+    # date sits inside a project category's window — the LLM tends to
+    # over-use misc for documents whose project name isn't spelled out.
+    by_path = {str(e.path): e for e in entries}
+    for a in assignments:
+        if a.primary_category_id != "misc":
+            continue
+        entry = by_path.get(str(a.file_path))
+        if entry is None:
+            continue
+        guess = _guess_by_time(entry, cats)
+        if guess is not None and guess != "misc":
+            a.primary_category_id = guess
+            a.primary_score = max(a.primary_score, 0.45)
+            a.reason = "시기로 추정 (사업 기간 일치)"
 
     return Plan(categories=cats, assignments=assignments)

@@ -14,7 +14,12 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".pdf",
     ".docx",
     ".pptx",
+    ".ppsx",
     ".xlsx",
+    ".doc",
+    ".ppt",
+    ".pps",
+    ".xls",
     ".hwp",
     ".hwpx",
     ".odt",
@@ -23,14 +28,18 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".md",
     ".markdown",
     ".csv",
+    ".tsv",
     ".log",
     ".html",
     ".htm",
     ".json",
+    ".jsonl",
     ".xml",
     ".yaml",
     ".yml",
     ".ini",
+    ".cfg",
+    ".toml",
 }
 
 
@@ -92,19 +101,26 @@ def extract_excerpt(path: Path, max_chars: int = 1800, timeout: float = 5.0) -> 
         return _safe(pdf_parser.parse, path, max_chars, timeout)
     if ext == ".docx":
         return _safe(office.parse_docx, path, max_chars, timeout)
-    if ext == ".pptx":
+    if ext in {".pptx", ".ppsx"}:
+        # .ppsx is an autoplay variant of .pptx — same XML container.
         return _safe(office.parse_pptx, path, max_chars, timeout)
     if ext == ".xlsx":
         return _safe(office.parse_xlsx, path, max_chars, timeout)
     if ext == ".odt":
         return _safe(office.parse_odt, path, max_chars, timeout)
+    if ext in {".doc", ".ppt", ".pps", ".xls"}:
+        # Legacy binary Office formats — best-effort text scrape via
+        # OLE compound storage; better than nothing for indexing.
+        return _safe(office.parse_legacy_office, path, max_chars, timeout)
     if ext == ".hwpx":
         return _safe(hwp_parser.parse_hwpx, path, max_chars, timeout)
     if ext == ".hwp":
         return _safe(hwp_parser.parse_hwp, path, max_chars, timeout)
     if ext == ".rtf":
         return _safe(text_parser.parse_rtf, path, max_chars, timeout)
-    if ext in {".txt", ".md", ".markdown", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".ini"}:
+    if ext in {".txt", ".md", ".markdown", ".csv", ".tsv", ".log",
+               ".json", ".jsonl", ".xml", ".yaml", ".yml",
+               ".ini", ".cfg", ".toml"}:
         return _safe(text_parser.parse_plain, path, max_chars, timeout)
     if ext in {".html", ".htm"}:
         return _safe(text_parser.parse_html, path, max_chars, timeout)
