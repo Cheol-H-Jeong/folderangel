@@ -39,35 +39,59 @@ class LLMError(RuntimeError):
     pass
 
 
+def infer_provider_from_url(base_url: str, model: str = "") -> str:
+    """Pick the right transport from the user-supplied API endpoint.
+
+    The user only ever has to fill in two fields: API endpoint URL and
+    API key.  We treat any URL that hits Google's native generative-
+    language host as Gemini (which has its own request shape) and
+    everything else as OpenAI-compatible.  An empty URL with a
+    Gemini-style model name also routes to Gemini.
+    """
+    u = (base_url or "").lower()
+    m = (model or "").lower()
+    if not u:
+        # No URL given — fall back to the model name to decide.
+        return "gemini" if m.startswith(("gemini-", "models/gemini-")) else "openai_compat"
+    if "generativelanguage.googleapis.com" in u and "/openai" not in u:
+        # Google's *native* Gemini endpoint.  The OpenAI-compat proxy
+        # at .../v1beta/openai is intentionally NOT matched here.
+        return "gemini"
+    return "openai_compat"
+
+
 def make_llm_client(config, api_key: Optional[str]):
     """Build the appropriate LLM client from a :class:`Config`.
 
-    Returns ``None`` when no key is available so the caller can fall back
-    to the mock planner.
+    Returns ``None`` when no key is available so the caller can fall
+    back to the mock planner.  The ``llm_provider`` config field is
+    derived from the URL when missing — the user is never asked to
+    pick a provider explicitly.
     """
     if not api_key:
         return None
-    provider = (getattr(config, "llm_provider", "gemini") or "gemini").lower()
     base_url = (getattr(config, "llm_base_url", "") or "").strip()
-    model = getattr(config, "model", "gemini-2.5-flash")
-    if provider in ("gemini", "google", "google_ai", ""):
-        client = GeminiClient(api_key=api_key, model=model)
-        # Only honour an explicit base_url when it actually looks like a
-        # Google generative-language host — otherwise it's almost certainly
-        # a leftover from a previous OpenAI-compat config and would 404.
+    model = getattr(config, "model", "")
+    provider = (getattr(config, "llm_provider", "") or "").lower()
+    if provider not in ("gemini", "openai_compat"):
+        provider = infer_provider_from_url(base_url, model)
+    if provider == "gemini":
+        client = GeminiClient(api_key=api_key, model=model or "gemini-2.5-flash")
         if base_url and ("googleapis.com" in base_url or "google" in base_url):
             client.base_url = base_url.rstrip("/")
         return client
-    if provider in ("openai", "openai_compat", "openai-compatible", "compat"):
-        if not base_url:
-            base_url = "https://api.openai.com/v1"
-        return OpenAICompatClient(
-            api_key=api_key,
-            model=model,
-            base_url=base_url,
-            reasoning_mode=getattr(config, "reasoning_mode", "off"),
-        )
-    raise LLMError(f"unknown llm provider: {provider}")
+    # Default: OpenAI-compatible.
+    if not base_url:
+        base_url = "https://api.openai.com/v1"
+    return OpenAICompatClient(
+        api_key=api_key,
+        model=model or "gpt-4o-mini",
+        base_url=base_url,
+        # Reasoning is always handled automatically: detect reasoning
+        # models by name and disable thinking, since for our JSON task
+        # it's pure overhead.  No user knob.
+        reasoning_mode="off",
+    )
 
 
 def _gemini_ctx_for(model: str) -> int:

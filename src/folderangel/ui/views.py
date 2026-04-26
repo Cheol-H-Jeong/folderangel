@@ -394,13 +394,20 @@ class SearchView(QtWidgets.QWidget):
 
         row = QtWidgets.QHBoxLayout()
         self.search = QtWidgets.QLineEdit()
-        self.search.setPlaceholderText("예: 2025 계약, 보고서, receipt…")
-        self.search.returnPressed.connect(self._do_search)
-        btn = QtWidgets.QPushButton("검색")
-        btn.clicked.connect(self._do_search)
-        row.addWidget(self.search, 1)
-        row.addWidget(btn)
+        self.search.setPlaceholderText("입력하는 즉시 검색됩니다 — 예: 2025 계약, 보고서, receipt…")
+        self.search.setClearButtonEnabled(True)
         v.addLayout(row)
+        row.addWidget(self.search, 1)
+
+        # Live-search: every keystroke triggers a fresh query, debounced
+        # by 120 ms so a fast typist doesn't fire a SQL hit per character.
+        # Pressing Enter still works for users who expect explicit submit.
+        self._search_timer = QtCore.QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(120)
+        self._search_timer.timeout.connect(self._do_search)
+        self.search.textChanged.connect(lambda _t: self._search_timer.start())
+        self.search.returnPressed.connect(self._do_search)
 
         self.table = QtWidgets.QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -434,6 +441,11 @@ class SearchView(QtWidgets.QWidget):
 
     def _do_search(self):
         q = self.search.text().strip()
+        if not q:
+            # Empty query: clear the results so the table doesn't look
+            # stale; keep the column layout intact.
+            self.table.setRowCount(0)
+            return
         hits = self.index_db.search(q, limit=300)
         self.table.setRowCount(len(hits))
         for row, h in enumerate(hits):
@@ -569,9 +581,10 @@ class SettingsView(QtWidgets.QWidget):
         v.addWidget(sub)
 
         # ────────────────────────────────────────────────────────────
-        # Card 1 — LLM 연결 (top of the page; provider drives everything
-        # below it).  Order matches the user's mental flow:
-        #   "어디에 연결하지? → 어떤 모델? → 어떤 키?"
+        # Card 1 — LLM 연결.  Two fields the user actually has to fill in:
+        #   API endpoint URL + API key.  Model is presetted but editable.
+        #   Provider type is inferred from the URL — never asked.
+        #   Reasoning mode is decided automatically per model name.
         # ────────────────────────────────────────────────────────────
         conn_card = Card()
         c1 = QtWidgets.QVBoxLayout(conn_card)
@@ -580,45 +593,46 @@ class SettingsView(QtWidgets.QWidget):
         c1_title = QtWidgets.QLabel("LLM 연결")
         c1_title.setStyleSheet("font-size:16px;font-weight:600;")
         c1.addWidget(c1_title)
-        c1_sub = QtWidgets.QLabel("제공자를 먼저 고르면 그 아래 항목이 그 제공자에 맞게 채워집니다.")
+        c1_sub = QtWidgets.QLabel(
+            "API 엔드포인트와 API 키만 채우면 됩니다. "
+            "Gemini · OpenAI · OpenRouter · Ollama · vLLM 등 어떤 호환 서비스든 같은 화면을 사용합니다."
+        )
+        c1_sub.setWordWrap(True)
         c1_sub.setStyleSheet("color:#6e6e73;font-size:12px;")
         c1.addWidget(c1_sub)
 
         f1 = QtWidgets.QFormLayout()
         f1.setSpacing(10)
 
-        # 1) Provider — top of the form, this is the master selector.
-        self.cmb_provider = QtWidgets.QComboBox()
-        self.cmb_provider.addItem("Gemini (Google AI Studio)", "gemini")
-        self.cmb_provider.addItem(
-            "OpenAI 호환 (OpenAI / Qwen / Ollama / vLLM / OpenRouter / …)",
-            "openai_compat",
-        )
-        for i in range(self.cmb_provider.count()):
-            if self.cmb_provider.itemData(i) == self.config.llm_provider:
-                self.cmb_provider.setCurrentIndex(i)
-                break
-        self.cmb_provider.currentIndexChanged.connect(self._on_provider_changed)
-        f1.addRow("LLM 제공자", self.cmb_provider)
-
-        # 2) Endpoint URL — gemini hides this row entirely, openai_compat
-        #    shows it with a sensible placeholder.
-        self.lbl_base_url = QtWidgets.QLabel("엔드포인트 URL")
+        # 1) Endpoint URL
         self.edit_base_url = QtWidgets.QLineEdit()
         self.edit_base_url.setPlaceholderText(
-            "예: https://api.openai.com/v1, http://localhost:11434/v1"
+            "예: https://generativelanguage.googleapis.com/v1beta · "
+            "https://api.openai.com/v1 · http://localhost:11434/v1"
         )
-        f1.addRow(self.lbl_base_url, self.edit_base_url)
+        self.edit_base_url.setText((self.config.llm_base_url or "").strip())
+        self.edit_base_url.textChanged.connect(lambda _t: self._refresh_status())
+        f1.addRow("API 엔드포인트", self.edit_base_url)
 
-        # 3) Model — combobox is editable so any backend's model id works.
-        self.lbl_model = QtWidgets.QLabel("모델")
+        # 2) Model — presetted but editable.
         self.cmb_model = QtWidgets.QComboBox()
         self.cmb_model.setEditable(True)
-        f1.addRow(self.lbl_model, self.cmb_model)
+        self.cmb_model.addItems([
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gpt-4o-mini",
+            "gpt-4o",
+            "claude-3-5-sonnet",
+            "claude-3-5-haiku",
+            "qwen2.5-72b-instruct",
+            "qwen3.6-35b-a3b",
+            "llama-3.1-70b-instruct",
+        ])
+        self.cmb_model.setCurrentText(self.config.model or "gemini-2.5-flash")
+        self.cmb_model.editTextChanged.connect(lambda _t: self._refresh_status())
+        f1.addRow("모델", self.cmb_model)
 
-        # 4) API key — last in the connection card, not first.  Echo
-        #    masked, dedicated save / delete buttons inline.
-        self.lbl_api_key = QtWidgets.QLabel("API 키")
+        # 3) API key — masked, with inline save / delete.
         self.edit_key = QtWidgets.QLineEdit()
         self.edit_key.setEchoMode(QtWidgets.QLineEdit.Password)
         self.edit_key.setMinimumWidth(280)
@@ -636,57 +650,18 @@ class SettingsView(QtWidgets.QWidget):
         key_row.addWidget(btn_clear_key)
         wrap_key = QtWidgets.QWidget()
         wrap_key.setLayout(key_row)
-        f1.addRow(self.lbl_api_key, wrap_key)
+        f1.addRow("API 키", wrap_key)
 
         c1.addLayout(f1)
 
-        # 5) Connection status (alive / mock / inferred) — single line.
+        # 4) Connection status — single line under the card.
         self.lbl_status = QtWidgets.QLabel("")
+        self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color:#6e6e73;font-size:12px;")
         c1.addWidget(self.lbl_status)
 
         v.addWidget(conn_card)
 
-        # ────────────────────────────────────────────────────────────
-        # Card 2 — 고급 옵션 (대부분 자동, 사용자가 만지지 않아도 됨)
-        # ────────────────────────────────────────────────────────────
-        adv_card = Card()
-        c2 = QtWidgets.QVBoxLayout(adv_card)
-        c2.setContentsMargins(18, 16, 18, 16)
-        c2.setSpacing(12)
-        c2_title = QtWidgets.QLabel("고급 (선택사항)")
-        c2_title.setStyleSheet("font-size:16px;font-weight:600;")
-        c2.addWidget(c2_title)
-        c2_sub = QtWidgets.QLabel(
-            "배치 크기 · 모호 임계값 · 컨텍스트 분할 같은 항목은 모델 컨텍스트 한도와 "
-            "파일 수에 맞춰 자동으로 결정됩니다. 아래는 정말 필요한 사람만 바꾸세요."
-        )
-        c2_sub.setWordWrap(True)
-        c2_sub.setStyleSheet("color:#6e6e73;font-size:12px;")
-        c2.addWidget(c2_sub)
-
-        f3 = QtWidgets.QFormLayout()
-        f3.setSpacing(10)
-
-        # Reasoning toggle — only meaningful for OpenAI-compat reasoning
-        # models (Qwen3 / DeepSeek-R1 / Magistral / Phi-4-mini-reasoning).
-        self.lbl_reasoning = QtWidgets.QLabel("Reasoning 모드")
-        self.cmb_reasoning = QtWidgets.QComboBox()
-        self.cmb_reasoning.addItem("끄기 (속도 우선, 권장)", "off")
-        self.cmb_reasoning.addItem("켜기 (사고 과정 사용 — 5~10배 느려짐)", "on")
-        self.cmb_reasoning.addItem("자동 (현재는 끄기와 동일)", "auto")
-        for i in range(self.cmb_reasoning.count()):
-            if self.cmb_reasoning.itemData(i) == self.config.reasoning_mode:
-                self.cmb_reasoning.setCurrentIndex(i)
-                break
-        self.cmb_reasoning.setToolTip(
-            "Qwen3 / DeepSeek-R1 같은 reasoning 모델의 <think> 단계.\n"
-            "폴더 분류는 단순 JSON 출력이라 보통 끄는 것이 5~10배 빠릅니다."
-        )
-        f3.addRow(self.lbl_reasoning, self.cmb_reasoning)
-
-        c2.addLayout(f3)
-        v.addWidget(adv_card)
 
         # ────────────────────────────────────────────────────────────
         # Card 4 — 외관
@@ -719,175 +694,77 @@ class SettingsView(QtWidgets.QWidget):
         v.addLayout(btn_row)
         v.addStretch(1)
 
-        # Initial sync — populate everything based on the current provider.
-        self._provider_pref_cache = dict(
-            getattr(self.config, "llm_settings_by_provider", {}) or {}
-        )
-        self._reapply_provider_view(self.cmb_provider.currentData() or "gemini")
+        # Initial render: populate the API-key placeholder with what we
+        # currently have and update the status line.
+        self._refresh_status()
 
     # ------------------------------------------------------------------
-    # Provider-aware view machinery.
+    # Single connection card — provider type is inferred from the URL,
+    # never asked.  Reasoning is decided automatically per model name.
     # ------------------------------------------------------------------
-    _GEMINI_MODELS = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-    ]
-    _OPENAI_COMPAT_MODELS = [
-        "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-4.1-mini",
-        "claude-3-5-sonnet",
-        "claude-3-5-haiku",
-        "qwen2.5-72b-instruct",
-        "qwen3.6-35b-a3b",
-        "llama-3.1-70b-instruct",
-    ]
-    _DEFAULT_BASE_URL = {
-        "gemini": "",  # built-in Google host
-        "openai_compat": "https://api.openai.com/v1",
-    }
-
-    def _on_provider_changed(self, _idx: int):
-        # Stash whatever the user had typed for the *previous* provider
-        # before we repaint, so flipping back returns to it instead of a
-        # blank line.
-        self._stash_current_provider_prefs()
-        provider = self.cmb_provider.currentData() or "gemini"
-        self._reapply_provider_view(provider)
-
-    def _stash_current_provider_prefs(self) -> None:
-        # Read the previous provider out of the cache key (the one whose
-        # values are currently shown).
-        prev = getattr(self, "_active_provider", None)
-        if prev is None:
-            return
-        self._provider_pref_cache[prev] = {
-            "base_url": self.edit_base_url.text().strip(),
-            "model": self.cmb_model.currentText().strip(),
-        }
-
-    def _reapply_provider_view(self, provider: str) -> None:
-        """Repaint the connection card to match ``provider``.
-
-        Behaviour:
-          * Endpoint URL row hidden for Gemini (it always uses the
-            built-in Google host).  Shown + populated with the user's
-            previous value for OpenAI-compat.
-          * Model dropdown's preset list switches per provider; the
-            stored model for *that* provider is restored.
-          * API-key field placeholder, label, and on-disk slot all
-            switch to the provider-specific keyring entry.
-          * Reasoning row is hidden for Gemini (irrelevant) and shown
-            for OpenAI-compat.
-          * Connection status line summarises what we'll talk to.
-        """
-        from ..config import provider_label
-
-        self._active_provider = provider
-        cache = self._provider_pref_cache.get(provider) or {}
-
-        # Endpoint URL — hide for Gemini, show for OpenAI-compat.
-        is_compat = (provider == "openai_compat")
-        self.lbl_base_url.setVisible(is_compat)
-        self.edit_base_url.setVisible(is_compat)
-        self.edit_base_url.setText(
-            cache.get("base_url") or self._DEFAULT_BASE_URL.get(provider, "")
+    def _current_provider(self) -> str:
+        from ..llm.client import infer_provider_from_url
+        return infer_provider_from_url(
+            self.edit_base_url.text().strip(),
+            self.cmb_model.currentText().strip(),
         )
 
-        # Model — swap preset list, restore per-provider value.
-        presets = (
-            self._OPENAI_COMPAT_MODELS if is_compat else self._GEMINI_MODELS
-        )
-        self.cmb_model.blockSignals(True)
-        self.cmb_model.clear()
-        self.cmb_model.addItems(presets)
-        remembered_model = cache.get("model") or presets[0]
-        self.cmb_model.setCurrentText(remembered_model)
-        self.cmb_model.blockSignals(False)
+    def _refresh_status(self) -> None:
+        from ..config import get_api_key, provider_label, Config
 
-        # API-key — load whatever's in keyring for *this* provider only.
-        self.edit_key.clear()
-        from ..config import get_api_key
+        provider = self._current_provider()
+        url = self.edit_base_url.text().strip()
+        model = self.cmb_model.currentText().strip()
+
+        proxy = Config()
+        proxy.llm_provider = provider
+        proxy.llm_base_url = url
+        pname = provider_label(proxy)
 
         existing = get_api_key(self.config, provider=provider)
-        proxy = type(self.config)()
-        proxy.llm_provider = provider
-        proxy.llm_base_url = self.edit_base_url.text().strip()
-        pname = provider_label(proxy)
-        self.lbl_api_key.setText(f"{pname} API 키")
         if existing:
-            self.edit_key.setPlaceholderText(
-                f"{pname} 키 저장됨 — 덮어쓰려면 새 키 입력"
-            )
+            self.edit_key.setPlaceholderText(f"{pname} 키 저장됨 — 덮어쓰려면 새 키 입력")
         else:
-            if provider == "gemini":
-                hint = "예: AIzaSy… (Google AI Studio)"
-            else:
-                hint = "예: sk-… (또는 로컬 서버 키)"
-            self.edit_key.setPlaceholderText(f"비워두면 Mock 모드. {hint}")
+            self.edit_key.setPlaceholderText("비워두면 Mock 모드 — 키 없이 휴리스틱 분류")
 
-        # Reasoning row — only for OpenAI-compat.
-        self.lbl_reasoning.setVisible(is_compat)
-        self.cmb_reasoning.setVisible(is_compat)
-
-        # Status line at the bottom of the connection card.
         if existing:
-            target = self.edit_base_url.text().strip() if is_compat else "Google AI Studio"
-            self.lbl_status.setText(f"● 연결 준비 — {pname} · {target or '기본'} · 모델 {remembered_model}")
+            target = url or ("Google AI Studio" if provider == "gemini" else "(기본 OpenAI 호환)")
+            self.lbl_status.setText(f"● 연결 준비 — {pname} · {target} · 모델 {model}")
             self.lbl_status.setStyleSheet("color:#0a8a3a;font-size:12px;")
         else:
             self.lbl_status.setText("○ Mock 모드 — API 키가 없으면 휴리스틱 분류로 동작합니다.")
             self.lbl_status.setStyleSheet("color:#a07000;font-size:12px;")
 
     # ------------------------------------------------------------------
-    # Save / clear API key (provider-aware).
-    # ------------------------------------------------------------------
     def _save_key(self):
         key = self.edit_key.text().strip()
         if not key:
             return
-        provider = self.cmb_provider.currentData() or "gemini"
+        provider = self._current_provider()
         secure = set_api_key(key, self.config, provider=provider)
         self.edit_key.clear()
-        suffix = "" if secure else " (keyring 없음 → config.json 평문)"
-        self.edit_key.setPlaceholderText(
-            f"{provider_label_for_ui(provider, self.edit_base_url.text())} 키 저장됨 — 덮어쓰려면 입력{suffix}"
-        )
-        self._reapply_provider_view(provider)
+        if not secure:
+            # Inline note rather than a popup, matches the rest of the card.
+            self.lbl_status.setText("키가 저장됐지만 keyring을 못 찾아 config.json 평문에 들어갔습니다.")
+            self.lbl_status.setStyleSheet("color:#a07000;font-size:12px;")
+        else:
+            self._refresh_status()
         self.config_changed.emit()
 
     def _clear_key(self):
-        provider = self.cmb_provider.currentData() or "gemini"
+        provider = self._current_provider()
         set_api_key("", self.config, provider=provider)
         self.config.api_key_fallback = ""
         save_config(self.config)
-        self._reapply_provider_view(provider)
+        self._refresh_status()
         self.config_changed.emit()
 
     # ------------------------------------------------------------------
     def _save(self):
-        provider = self.cmb_provider.currentData() or "gemini"
-        # Persist whatever the user had on screen, plus the cached
-        # values for the *other* provider so they survive a switch.
-        self._stash_current_provider_prefs()
+        provider = self._current_provider()
         self.config.llm_provider = provider
         self.config.llm_base_url = self.edit_base_url.text().strip()
         self.config.model = self.cmb_model.currentText().strip()
-        self.config.llm_settings_by_provider = {
-            "gemini": self._provider_pref_cache.get("gemini") or
-                      {"base_url": "", "model": "gemini-2.5-flash"},
-            "openai_compat": self._provider_pref_cache.get("openai_compat") or
-                             {"base_url": "https://api.openai.com/v1",
-                              "model": "gpt-4o-mini"},
-        }
-        # Make sure the *current* provider's slot reflects what we just typed.
-        self.config.llm_settings_by_provider[provider] = {
-            "base_url": self.config.llm_base_url,
-            "model": self.config.model,
-        }
         # Auto-tuned values: never user-editable.  Always force the
         # behaviour to "single call when it fits, micro-batch otherwise"
         # and a sensible ambiguity threshold so users don't have to
@@ -901,7 +778,10 @@ class SettingsView(QtWidgets.QWidget):
         # the model's real context window when available.
         self.config.economy_max_files = max(self.config.economy_max_files or 120, 60)
         self.config.appearance = self.cmb_appearance.currentText()
-        self.config.reasoning_mode = self.cmb_reasoning.currentData() or "off"
+        # Reasoning mode is decided automatically from the model name in
+        # OpenAICompatClient — no user knob.  Keep the saved value at
+        # "off" so any persisted older state can't surprise.
+        self.config.reasoning_mode = "off"
         save_config(self.config)
         self.config_changed.emit()
 
