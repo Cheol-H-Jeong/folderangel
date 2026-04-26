@@ -144,6 +144,56 @@ SINGLE_CALL_INSTRUCTION = """아래 전체 파일 목록을 보고, **한 번의
 """
 
 
+FILENAME_FIRST_PASS_INSTR = """다음은 코퍼스의 **파일명 목록**이다. 본문은 주지 않는다.
+
+너는 두 가지 일을 동시에 한다:
+1) 파일명만 보고 사업/과제/프로젝트/기관/목적/용도 단위 카테고리를 설계한다.
+2) 각 파일에 대해 다음 중 하나를 선택한다:
+   (a) **파일명만으로 어느 카테고리인지 확신**할 수 있다 → assignments 에 넣는다.
+       파일명에 사업명/고객사/시스템/제품/약어 등 식별자가 분명히 보이는 경우.
+   (b) **파일명이 너무 일반적**이다 (예: "최종.pptx", "보고서.docx", "재무제표.xlsx",
+       "약관.pdf", "공지사항.docx") → assignments 에 넣지 말고 **deferred** 배열에
+       그 파일의 path 그대로 넣는다.  본문을 보고 다음 단계에서 다시 분류된다.
+
+원칙:
+- 추상 라벨 금지 ("문서", "보고서", "프레젠테이션", "기타").
+- 확신이 70% 이하면 deferred 로 보낸다 — 잘못된 분류보다 다음 단계로 넘기는 것이 낫다.
+- categories 수는 {min_categories}~{max_categories} 사이로 둔다.
+
+응답 JSON 스키마(엄격, 다른 텍스트 금지):
+{{
+  "categories": [
+    {{ "id": "slug","name": "구체 폴더명","description": "한 줄","time_label": "","duration": "mixed","group": 1 }}
+  ],
+  "assignments": [
+    {{ "path": "원본 path","primary": "category_id",
+       "primary_score": 0.0,
+       "secondary": [ {{"id": "category_id","score": 0.0}} ],
+       "reason": "한 줄 사유" }}
+  ],
+  "deferred": [ "원본 path", "원본 path" ]
+}}
+임계값({ambiguity_threshold}) 이하로 차이나는 다른 카테고리만 secondary 에 추가."""
+
+
+def build_filename_first_pass(
+    files: list[dict],
+    min_categories: int,
+    max_categories: int,
+    ambiguity_threshold: float,
+    *,
+    reclassify_mode: bool = True,
+) -> str:
+    # files: [{"path": "...", "name": "...", "ext": "..."}].  No body.
+    body = json.dumps({"files": files}, ensure_ascii=False, indent=2)
+    instr = FILENAME_FIRST_PASS_INSTR.format(
+        min_categories=min_categories,
+        max_categories=max_categories,
+        ambiguity_threshold=ambiguity_threshold,
+    )
+    return f"{STAGE_A_SYSTEM}{_maybe_hint(reclassify_mode)}\n\n{instr}\n\n데이터:\n{body}"
+
+
 LONGTAIL_DISCOVER_INSTR = """이 파일들은 1차 클러스터링에서 어느 사업/과제/프로젝트/기관/목적/용도에도
 정합하지 못해 **롱테일**로 분리된 파일들이다. 위 'categories'는 1차에서 이미 합의된 폴더 목록이고,
 아래 'files' 는 거기에 어울리지 않거나 본문 유사도가 낮아 빠진 파일들이다.

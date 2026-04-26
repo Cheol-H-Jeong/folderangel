@@ -359,6 +359,112 @@ def test_longtail_discover_creates_new_category_for_unrelated_file(tmp_path):
     assert fake.calls == 2, f"unexpected LLM call count: {fake.calls}"
 
 
+def test_reclassify_filename_first_pass_then_body_pass(tmp_path):
+    """Re-classify mode runs a filename-only pre-pass.  Files the LLM
+    can confidently classify by name alone (e.g. those with the project
+    keyword in the filename) get assigned right there.  Generic-named
+    files (e.g. "약관.pdf") are deferred to the body-aware tier
+    pipeline below, which may discover entirely new categories from
+    body content."""
+    cfg = Config()
+    cfg.reclassify_mode = True
+    # Force the medium tier so the filename pass triggers but a single
+    # body call covers the deferred slice.
+    cfg.small_corpus_files = 3
+    cfg.hierarchical_min_files = 100
+    cfg.cluster_min_size = 2
+    cfg.reps_per_cluster = 2
+
+    class _Fake:
+        def __init__(self):
+            self.calls = 0
+            self.prompts: list[str] = []
+
+        def generate_json(self, prompt, **_kw):
+            self.calls += 1
+            self.prompts.append(prompt)
+            if self.calls == 1:
+                # Filename-first pass.  Classifies the proj_X files by
+                # filename alone, defers the generic 약관/보고서 files.
+                return {
+                    "categories": [
+                        {"id": "proj-x", "name": "ProjectX",
+                         "group": 1, "duration": "annual"},
+                    ],
+                    "assignments": [
+                        {"path": "/work/projx_overview.pdf",
+                         "primary": "proj-x", "primary_score": 0.92,
+                         "secondary": [], "reason": "파일명에 ProjectX"},
+                        {"path": "/work/projx_v2.pdf",
+                         "primary": "proj-x", "primary_score": 0.92,
+                         "secondary": [], "reason": "파일명에 ProjectX"},
+                    ],
+                    "deferred": [
+                        "/work/약관.pdf",
+                        "/work/보고서.docx",
+                    ],
+                }
+            # Second call: deferred subset goes through normal pipeline.
+            # Mock returns a new category.
+            return {
+                "categories": [
+                    {"id": "insurance-policy",
+                     "name": "원더풀S 통합보험 약관",
+                     "group": 2, "duration": "mixed"},
+                ],
+                "assignments": [
+                    {"path": "/work/약관.pdf",
+                     "primary": "insurance-policy",
+                     "primary_score": 0.85,
+                     "secondary": [], "reason": "본문이 보험 약관"},
+                    {"path": "/work/보고서.docx",
+                     "primary": "insurance-policy",
+                     "primary_score": 0.6,
+                     "secondary": [], "reason": "본문 유사"},
+                ],
+            }
+
+    fake = _Fake()
+    p = Planner(cfg, gemini=fake)
+    entries = [
+        _entry("projx_overview.pdf", ts=1700000000.0,
+               content="ProjectX overview milestone summary"),
+        _entry("projx_v2.pdf", ts=1700000050.0,
+               content="ProjectX v2 release notes"),
+        _entry("약관.pdf", ts=1700000100.0,
+               content="무배당 원더풀S 통합보험 약관 보험금 청구 면책"),
+        _entry("보고서.docx", ts=1700000150.0,
+               content="원더풀S 약관 검토 보고 — 면책 조항"),
+    ]
+    plan = p.plan(entries)
+
+    cat_ids = {c.id for c in plan.categories}
+    assert "proj-x" in cat_ids, f"filename-pass category missing: {cat_ids}"
+    assert "insurance-policy" in cat_ids, (
+        f"deferred-pass category missing: {cat_ids}"
+    )
+
+    # First call must be the filename-only pass — body excerpts must
+    # not appear in that prompt.
+    pass1 = fake.prompts[0]
+    assert "ProjectX overview milestone" not in pass1, (
+        "filename-first pass leaked body content"
+    )
+    assert "원더풀S 통합보험 약관" not in pass1, (
+        "filename-first pass leaked body content"
+    )
+    # But filename does.
+    assert "projx_overview.pdf" in pass1
+    assert "약관.pdf" in pass1
+
+    # Confidently-named files carry the filename-pass marker.
+    px = [a for a in plan.assignments if a.file_path.name == "projx_overview.pdf"]
+    assert px and "파일명 패스" in (px[0].reason or "")
+    # Deferred files were not assigned in pass 1, they took the body path.
+    yk = [a for a in plan.assignments if a.file_path.name == "약관.pdf"]
+    assert yk and yk[0].primary_category_id == "insurance-policy"
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to

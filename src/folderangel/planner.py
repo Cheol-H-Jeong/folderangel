@@ -405,6 +405,73 @@ class Planner:
         if progress:
             progress(self._tier_announcement(tier, len(entries)), 0.16)
 
+        # ------------------------------------------------------------------
+        # Re-classify filename-first pass.  Only fires when the user
+        # explicitly enabled "재분류 모드" AND the corpus is big enough
+        # that it would otherwise hit the medium/large tier.  We send a
+        # *filename-only* payload (no body, no path tail) so the LLM can
+        # cheaply pick out the obvious project/사업/기관 buckets and
+        # tell us which files it can't classify by name alone — those
+        # get deferred to the body-aware tier pipeline below.
+        # ------------------------------------------------------------------
+        if (
+            anonymise
+            and tier in ("medium", "large")
+            and len(entries) > int(getattr(self.config, "small_corpus_files", 60))
+        ):
+            try:
+                pass1 = self._filename_first_pass(entries, payloads, progress)
+            except Exception as exc:
+                log.warning("filename-first pass failed; falling through: %s", exc)
+                pass1 = None
+            if pass1 is not None:
+                seed_cats = pass1["categories"]
+                seed_assigns = pass1["assignments"]
+                deferred_paths = set(pass1["deferred"])
+                deferred_entries = [
+                    e for e in entries if str(e.path) in deferred_paths
+                ]
+                if not deferred_entries:
+                    if progress:
+                        progress(
+                            f"plan: 파일명 패스로 전체 {len(entries)}개 분류 완료",
+                            0.95,
+                        )
+                    return _plan_from_dict(
+                        {"categories": seed_cats, "assignments": seed_assigns},
+                        entries,
+                    )
+                if progress:
+                    progress(
+                        f"plan: 파일명 패스 — 자신있는 분류 {len(seed_assigns)}개, "
+                        f"본문/시그니처 후속 분류 {len(deferred_entries)}개",
+                        0.3,
+                    )
+                # Re-tier the deferred subset and run the normal pipeline
+                # on it.  The deferred set is strictly smaller, so we do
+                # this in-process by recursing into a helper that skips
+                # the filename pass to avoid an infinite loop.
+                sub_dict = self._plan_deferred(deferred_entries, progress)
+                # Merge: dedupe categories on id (seed wins).
+                seed_ids = {c.get("id") for c in seed_cats}
+                merged_cats = list(seed_cats)
+                cap = int(self.config.max_categories)
+                for c in sub_dict.get("categories") or []:
+                    cid = c.get("id")
+                    if not cid or cid in seed_ids:
+                        continue
+                    if len(merged_cats) >= cap:
+                        break
+                    merged_cats.append(c)
+                    seed_ids.add(cid)
+                merged_assigns = list(seed_assigns) + list(
+                    sub_dict.get("assignments") or []
+                )
+                return _plan_from_dict(
+                    {"categories": merged_cats, "assignments": merged_assigns},
+                    entries,
+                )
+
         if tier == "large":
             try:
                 if progress:
@@ -1119,6 +1186,154 @@ class Planner:
                         a["primary"] = _closest_category(a["primary"], categories)
                 assignments_raw.extend(m["assignments"])
         return {"categories": categories, "assignments": assignments_raw}
+
+    # ------------------------------------------------------------------
+    def _filename_first_pass(
+        self,
+        entries: list[FileEntry],
+        payloads: list[dict],
+        progress: Optional[ProgressCB],
+    ) -> Optional[dict]:
+        """Filename-only LLM call used by the re-classify mode.
+
+        Sends just ``[{"path", "name", "ext"}]`` per file — no body,
+        no metadata.  The LLM produces an initial set of categories
+        plus assignments for files it can confidently classify by
+        filename alone, and a ``deferred`` list of paths for everything
+        else.  Deferred files get the regular body-aware tier
+        pipeline downstream.
+
+        Returns ``{"categories", "assignments", "deferred"}`` or
+        ``None`` if the LLM call hard-failed (caller falls through
+        to the regular pipeline).
+        """
+        # Strip every payload down to filename-only for the prompt.
+        # The path field is preserved (already anonymised by the
+        # caller) so we can match assignments back to entries.
+        slim = [
+            {
+                "path": d.get("path") or "",
+                "name": d.get("name") or "",
+                "ext": d.get("ext") or "",
+            }
+            for d in payloads
+        ]
+        if not slim:
+            return None
+
+        # Cap chunk size so a corpus of ~5,000 filenames stays within
+        # any modern context window.  ~50 chars/file × 200 files ≈
+        # 10K chars of payload — safe for 8K-context local models too.
+        chunk_size = max(50, int(getattr(self.config, "economy_max_files", 120)))
+        chunks = [slim[i : i + chunk_size] for i in range(0, len(slim), chunk_size)]
+        if progress:
+            progress(
+                f"plan: 파일명 패스 — {len(slim)}개 파일을 {len(chunks)} 청크로 분리",
+                0.18,
+            )
+
+        agg_cats: list[dict] = []
+        agg_assigns: list[dict] = []
+        agg_deferred: list[str] = []
+        seen_cat_ids: set[str] = set()
+        for idx, chunk in enumerate(chunks, 1):
+            prompt = prompts.build_filename_first_pass(
+                chunk,
+                self.config.min_categories,
+                self.config.max_categories,
+                self.config.ambiguity_threshold,
+                reclassify_mode=True,
+            )
+            if progress:
+                progress(
+                    f"plan: 파일명 패스 [{idx}/{len(chunks)}] LLM 호출 ({len(chunk)} 파일)…",
+                    0.18 + (idx - 1) / max(1, len(chunks)) * 0.1,
+                )
+            try:
+                resp = self._llm_call(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"파일명 패스 [{idx}/{len(chunks)}] 응답 대기", progress
+                    ),
+                    stream_label=f"파일명 패스 [{idx}/{len(chunks)}] 토큰",
+                    progress=progress,
+                )
+            except LLMError as exc:
+                log.warning("filename-first chunk %d failed: %s — defer all", idx, exc)
+                # Defer the entire chunk so nothing is silently dropped.
+                agg_deferred.extend(d.get("path") or "" for d in chunk)
+                continue
+            cats = resp.get("categories") or []
+            assigns = resp.get("assignments") or []
+            deferred = resp.get("deferred") or []
+            if isinstance(cats, list):
+                for c in cats:
+                    cid = (c.get("id") or "").strip()
+                    if not cid or cid in seen_cat_ids:
+                        continue
+                    agg_cats.append(c)
+                    seen_cat_ids.add(cid)
+            if isinstance(assigns, list):
+                for a in assigns:
+                    a.setdefault("reason", "")
+                    a["reason"] = (a.get("reason") or "") + " · 파일명 패스"
+                    agg_assigns.append(a)
+            if isinstance(deferred, list):
+                agg_deferred.extend(str(p) for p in deferred if p)
+
+        if not agg_cats and not agg_assigns:
+            return None  # complete miss → caller falls through
+        return {
+            "categories": agg_cats,
+            "assignments": agg_assigns,
+            "deferred": agg_deferred,
+        }
+
+    # ------------------------------------------------------------------
+    def _plan_deferred(
+        self,
+        deferred_entries: list[FileEntry],
+        progress: Optional[ProgressCB],
+    ) -> dict:
+        """Run the regular tier pipeline on the deferred subset only.
+
+        We rebuild minimal payloads from the deferred FileEntry objects
+        and dispatch through the same tier picker as ``plan()`` — but
+        skip the filename-first pass to avoid recursion.
+        """
+        from .llm.client import _looks_like_mojibake
+
+        anonymise = bool(getattr(self.config, "reclassify_mode", False))
+        per_file_cap = (
+            self.config.max_excerpt_chars
+            if anonymise
+            else min(self.config.max_excerpt_chars, 1200)
+        )
+        payloads: list[dict] = []
+        for e in deferred_entries:
+            d = e.to_summary_dict()
+            d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
+            d["path"] = _safe_path_repr(
+                d.get("path") or "", _looks_like_mojibake, anonymise_parents=anonymise
+            )
+            payloads.append(d)
+
+        tier = self._pick_tier(deferred_entries)
+        if tier == "large":
+            try:
+                return self._hierarchical_plan(deferred_entries, progress)
+            except Exception as exc:
+                log.warning("deferred hierarchical failed (%s) — falling through", exc)
+        if self._should_use_microbatch(payloads):
+            try:
+                return self._microbatch_plan(payloads, progress)
+            except Exception as exc:
+                log.warning("deferred micro-batch failed (%s) — falling through", exc)
+        try:
+            return self._single_call_plan(payloads, progress)
+        except Exception as exc:
+            log.warning("deferred single-call failed (%s) — empty", exc)
+            return {"categories": [], "assignments": []}
 
     # ------------------------------------------------------------------
     def _longtail_discover_call(
