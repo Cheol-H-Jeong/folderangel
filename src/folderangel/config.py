@@ -197,6 +197,13 @@ class Config:
     ignore_patterns: list[str] = field(
         default_factory=lambda: [".*", "~$*", "Thumbs.db", ".DS_Store", "desktop.ini"]
     )
+    # When True, parent folder names are anonymised in every path the
+    # LLM sees ("[folder]" placeholder).  Use this to RE-classify a
+    # corpus that was previously organised badly — without it, the LLM
+    # tends to defer to the existing folder names and the wrong groups
+    # stay wrong.  Default off because the realistic case is "respect
+    # whatever the user already curated".
+    reclassify_mode: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

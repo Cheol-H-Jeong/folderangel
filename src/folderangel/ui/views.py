@@ -872,6 +872,36 @@ class SettingsView(QtWidgets.QWidget):
 
         v.addWidget(conn_card)
 
+        # ────────────────────────────────────────────────────────────
+        # Card 3 — 분류 동작
+        # 평소엔 LLM이 기존 폴더명을 단서로 활용해 사용자가 이미
+        # 정리해 둔 구조를 존중합니다.  하지만 한번 잘못 분류된
+        # 하위 폴더 체계를 다시 입력해 *재분류*하려는 경우에는,
+        # 그 폴더명이 오히려 잘못된 그룹을 그대로 잠가 버립니다.
+        # 이 토글은 LLM에 보내는 경로에서 부모 폴더명을 익명화해
+        # 파일명 + 본문만으로 재분류하도록 강제합니다.
+        # ────────────────────────────────────────────────────────────
+        beh_card = Card()
+        c3 = QtWidgets.QVBoxLayout(beh_card)
+        c3.setContentsMargins(18, 16, 18, 16)
+        c3.setSpacing(10)
+        c3_title = QtWidgets.QLabel("분류 동작")
+        c3_title.setStyleSheet("font-size:16px;font-weight:600;")
+        c3.addWidget(c3_title)
+        self.chk_reclassify = QtWidgets.QCheckBox(
+            "재분류 모드 — 기존 폴더명을 무시하고 파일명·본문만으로 분류"
+        )
+        self.chk_reclassify.setChecked(bool(getattr(self.config, "reclassify_mode", False)))
+        c3.addWidget(self.chk_reclassify)
+        c3_hint = QtWidgets.QLabel(
+            "한번 잘못 정리된 폴더를 다시 분류할 때만 켜세요. "
+            "보통은 LLM이 기존 폴더명을 단서로 삼는 편이 더 정확합니다."
+        )
+        c3_hint.setWordWrap(True)
+        c3_hint.setStyleSheet("color:#6e6e73;font-size:12px;")
+        c3.addWidget(c3_hint)
+        v.addWidget(beh_card)
+
 
         # ────────────────────────────────────────────────────────────
         # Card 4 — 외관
@@ -1071,6 +1101,7 @@ class SettingsView(QtWidgets.QWidget):
         # economy_max_files is kept as a soft cap; the planner now uses
         # the model's real context window when available.
         self.config.economy_max_files = max(self.config.economy_max_files or 120, 60)
+        self.config.reclassify_mode = bool(self.chk_reclassify.isChecked())
         self.config.appearance = self.cmb_appearance.currentText()
         # Reasoning mode is decided automatically from the model name in
         # OpenAICompatClient — no user knob.  Keep the saved value at

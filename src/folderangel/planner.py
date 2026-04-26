@@ -133,7 +133,7 @@ def _cosine_to_ref(ref_doc: str, docs: list[str]) -> list[Optional[float]]:
     return out
 
 
-def _safe_path_repr(path_str: str, is_mojibake) -> str:
+def _safe_path_repr(path_str: str, is_mojibake, *, anonymise_parents: bool = False) -> str:
     """Redact pre-existing mojibake folder names from a path before we
     show it to the LLM.
 
@@ -141,6 +141,11 @@ def _safe_path_repr(path_str: str, is_mojibake) -> str:
     that looks like Latin-1-of-UTF-8 garbage with a neutral placeholder
     so the model has no incentive to reuse the broken name.  Also
     strips any leading "{n}." prefix from prior runs.
+
+    When ``anonymise_parents=True`` (re-classify mode), every parent
+    component is replaced with ``[folder]`` regardless of mojibake —
+    used when the user has explicitly asked to re-classify a corpus
+    whose existing folder structure shouldn't anchor the LLM.
     """
     if not path_str:
         return path_str
@@ -148,11 +153,15 @@ def _safe_path_repr(path_str: str, is_mojibake) -> str:
     if not p.parts:
         return path_str
     redacted: list[str] = []
-    for part in p.parts:
+    parts = list(p.parts)
+    last_idx = len(parts) - 1
+    for i, part in enumerate(parts):
         # Drop a leading "{n}." prefix from parent dirs so the model
         # sees the descriptive part only.
         core = re.sub(r"^\s*\d\.\s+", "", part)
-        if is_mojibake(core, strict=True):
+        if anonymise_parents and i < last_idx:
+            redacted.append("[folder]")
+        elif is_mojibake(core, strict=True):
             redacted.append("[unknown-folder]")
         else:
             redacted.append(part)
@@ -337,13 +346,24 @@ class Planner:
         # only — see ``_safe_path_repr`` for the redaction logic.
         from .llm.client import _looks_like_mojibake
 
-        per_file_cap = min(self.config.max_excerpt_chars, 1200)
+        anonymise = bool(getattr(self.config, "reclassify_mode", False))
+        # Re-classify mode hides parent folder names, so the LLM has
+        # less context to work with.  Compensate by lifting the per-file
+        # excerpt cap to the full max_excerpt_chars so file *content*
+        # picks up the slack.
+        per_file_cap = (
+            self.config.max_excerpt_chars
+            if anonymise
+            else min(self.config.max_excerpt_chars, 1200)
+        )
         payloads = []
         for e in entries:
             d = e.to_summary_dict()
             excerpt = d.get("excerpt", "") or ""
             d["excerpt"] = excerpt[:per_file_cap]
-            d["path"] = _safe_path_repr(d.get("path") or "", _looks_like_mojibake)
+            d["path"] = _safe_path_repr(
+                d.get("path") or "", _looks_like_mojibake, anonymise_parents=anonymise
+            )
             payloads.append(d)
 
         # Short-circuit if there's no Gemini client — everything is mock.
@@ -444,7 +464,9 @@ class Planner:
                     f"stage-a [{idx}/{len(batches)}] LLM 호출 ({len(batch)} 파일)…",
                     (idx - 1) / max(1, len(batches)) * 0.4,
                 )
-            prompt = prompts.build_stage_a(batch)
+            prompt = prompts.build_stage_a(
+                batch, reclassify_mode=bool(getattr(self.config, "reclassify_mode", False))
+            )
             try:
                 resp = self._llm_call(
                     prompt,
@@ -471,6 +493,7 @@ class Planner:
                 candidate_sets,
                 self.config.min_categories,
                 self.config.max_categories,
+                reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
             )
             merged = self._llm_call(
                 merge_prompt,
@@ -557,6 +580,7 @@ class Planner:
             self.config.min_categories,
             self.config.max_categories,
             self.config.ambiguity_threshold,
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
         )
         # Korean+JSON mixed: ~3 chars/token is a safe upper bound.
         prompt_tokens_est = max(1, len(prompt) // 3)
@@ -590,7 +614,10 @@ class Planner:
                     f"micro-batch A [{idx}/{len(chunks)}] 후보 추출 ({len(batch)} 파일)…",
                     0.2 + (idx - 1) / max(1, len(chunks)) * 0.35,
                 )
-            prompt = prompts.build_compact_discover(_strip_payload(batch))
+            prompt = prompts.build_compact_discover(
+                _strip_payload(batch),
+                reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            )
             try:
                 resp = self._llm_call(
                     prompt,
@@ -626,6 +653,7 @@ class Planner:
             candidate_sets,
             self.config.min_categories,
             self.config.max_categories,
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
         )
         merged = self._llm_call(
             merge_prompt,
@@ -656,6 +684,7 @@ class Planner:
                 _strip_payload(batch),
                 categories_raw,
                 self.config.ambiguity_threshold,
+                reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
             )
             try:
                 resp = self._llm_call(
@@ -802,11 +831,20 @@ class Planner:
 
         # 2) Ask the LLM (single call when reps fit; micro-batch fallback
         #    if the rep bag itself is too big).
-        per_file_cap = min(self.config.max_excerpt_chars, 1200)
+        from .llm.client import _looks_like_mojibake
+        anonymise = bool(getattr(self.config, "reclassify_mode", False))
+        per_file_cap = (
+            self.config.max_excerpt_chars
+            if anonymise
+            else min(self.config.max_excerpt_chars, 1200)
+        )
         rep_payloads: list[dict] = []
         for e in rep_entries:
             d = e.to_summary_dict()
             d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
+            d["path"] = _safe_path_repr(
+                d.get("path") or "", _looks_like_mojibake, anonymise_parents=anonymise
+            )
             rep_payloads.append(d)
 
         if progress:
@@ -903,6 +941,11 @@ class Planner:
                 for e in outliers:
                     d = e.to_summary_dict()
                     d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
+                    d["path"] = _safe_path_repr(
+                        d.get("path") or "",
+                        _looks_like_mojibake,
+                        anonymise_parents=anonymise,
+                    )
                     payloads_out.append(d)
                 extra = self._stage_b_call(payloads_out, categories_raw, progress)
                 for a in extra:
@@ -964,6 +1007,7 @@ class Planner:
                 self.config.min_categories,
                 self.config.max_categories,
                 self.config.ambiguity_threshold,
+                reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
             )
             if progress:
                 progress(f"plan: LLM 호출 중 ({len(payloads)} 파일)…", -1.0)
@@ -1013,6 +1057,7 @@ class Planner:
             self.config.min_categories,
             self.config.max_categories,
             self.config.ambiguity_threshold,
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
         )
         design = self._llm_call(
             design_prompt,
@@ -1061,7 +1106,10 @@ class Planner:
         Recurses down to single-file batches before giving up.
         """
         prompt = prompts.build_stage_b(
-            batch, categories_payload, self.config.ambiguity_threshold
+            batch,
+            categories_payload,
+            self.config.ambiguity_threshold,
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
         )
         try:
             resp = self._llm_call(
