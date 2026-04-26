@@ -14,6 +14,77 @@ from ..models import OperationResult
 from .widgets import Card, PathDropBar, StageIndicator, StatsRow
 
 
+class ToastDialog(QtWidgets.QDialog):
+    """Apple-style modal toast.
+
+    Drop-in replacement for ``QMessageBox.information`` whose default
+    layout looks cramped on short messages — title and OK button
+    floated awkwardly to opposite corners, ellipsised on small windows.
+    This dialog uses an explicit vertical box with generous padding,
+    a centred title and body, and a single right-aligned OK button.
+    Sized to comfortably fit the message at any parent-window size.
+    """
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        title: str,
+        body: str = "",
+        *,
+        kind: str = "info",  # info | warn | error
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setMaximumWidth(520)
+        # No system frame icon — keep it visually quiet.
+        self.setWindowFlag(QtCore.Qt.WindowContextHelpButtonHint, False)
+
+        accent = {
+            "info":  "#0a8a3a",
+            "warn":  "#c37200",
+            "error": "#b3261e",
+        }.get(kind, "#0a8a3a")
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(24, 22, 24, 18)
+        outer.setSpacing(12)
+
+        title_label = QtWidgets.QLabel(title)
+        title_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        title_label.setStyleSheet(
+            f"font-size:15px; font-weight:600; color:{accent};"
+        )
+        title_label.setWordWrap(True)
+        outer.addWidget(title_label)
+
+        if body:
+            body_label = QtWidgets.QLabel(body)
+            body_label.setWordWrap(True)
+            body_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+            body_label.setStyleSheet("font-size:13px; color:#1d1d1f;")
+            outer.addWidget(body_label)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_row.addStretch(1)
+        ok = QtWidgets.QPushButton("확인")
+        ok.setObjectName("Primary")
+        ok.setMinimumWidth(96)
+        ok.setDefault(True)
+        ok.setAutoDefault(True)
+        ok.clicked.connect(self.accept)
+        btn_row.addWidget(ok)
+        outer.addLayout(btn_row)
+
+
+def show_toast_dialog(
+    parent: QtWidgets.QWidget, title: str, body: str = "", *, kind: str = "info"
+) -> None:
+    ToastDialog(parent, title, body, kind=kind).exec()
+
+
 def provider_label_for_ui(provider: str, base_url: str) -> str:
     """Convenience wrapper used by the Settings card; isolates the UI
     layer from the config module's dataclass requirements."""
@@ -514,10 +585,11 @@ class SearchView(QtWidgets.QWidget):
         if not d:
             return
         n = self.index_db.reindex_folder(Path(d), recursive=True)
-        QtWidgets.QMessageBox.information(
+        show_toast_dialog(
             self,
             "인덱싱 완료",
-            f"{n}개 파일을 인덱스에 추가/갱신했습니다.\n이제 검색이 즉시 가능합니다.",
+            f"{n}개 파일을 인덱스에 추가하거나 갱신했습니다. 이제 검색이 즉시 가능합니다.",
+            kind="info",
         )
         self._do_search()
 
@@ -926,15 +998,9 @@ class SettingsView(QtWidgets.QWidget):
         self.config.reasoning_mode = "off"
         save_config(self.config)
         self.config_changed.emit()
-
-        # Modal "saved" toast — pin a min-width so the title can't get
-        # ellipsised to "저" on small windows.
-        box = QtWidgets.QMessageBox(self)
-        box.setIcon(QtWidgets.QMessageBox.Information)
-        box.setWindowTitle("설정 저장됨")
-        box.setText("설정이 저장되었습니다.")
-        box.setStandardButtons(QtWidgets.QMessageBox.Ok)
-        # Force a roomy minimum so the title bar shows the full text on
-        # any window size, including small / non-maximised states.
-        box.setStyleSheet("QLabel{min-width:280px;}")
-        box.exec()
+        show_toast_dialog(
+            self,
+            "설정 저장됨",
+            "변경한 설정이 적용되었습니다.",
+            kind="info",
+        )
