@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from .cluster import Cluster, cluster_files, collapse_ratio, signature
 from .config import Config
 from .llm import LLMError, mock as mock_planner, prompts
 from .models import Assignment, Category, FileEntry, Plan, SecondaryAssignment
@@ -293,6 +294,21 @@ class Planner:
                 progress("mock-planner", 0.5)
             plan_dict = mock_planner.plan(payloads, self.config.ambiguity_threshold)
             return _plan_from_dict(plan_dict, entries)
+
+        # ------------------------------------------------------------------
+        # Hierarchical (large-corpus) path: collapse files to filename
+        # signature clusters and only ask the LLM about cluster
+        # representatives, then propagate the assignment to every
+        # cluster member.  Sub-linear LLM cost on big folders.  See
+        # docs/LARGE_CORPUS.md.
+        if self._should_use_hierarchical(entries, payloads):
+            try:
+                if progress:
+                    progress("plan: hierarchical 모드 (대규모 corpus)…", 0.18)
+                plan_dict = self._hierarchical_plan(entries, progress)
+                return _plan_from_dict(plan_dict, entries)
+            except Exception as exc:
+                log.warning("hierarchical plan failed; falling through: %s", exc)
 
         # ------------------------------------------------------------------
         # Local LLM (small-context) micro-batch path.  When the provider is
@@ -604,6 +620,140 @@ class Planner:
                 self._microbatch_discover_split(batch[:mid], progress)
                 + self._microbatch_discover_split(batch[mid:], progress)
             )
+
+    # ------------------------------------------------------------------
+    def _should_use_hierarchical(
+        self, entries: list[FileEntry], payloads: list[dict]
+    ) -> bool:
+        """Pick the hierarchical path when the corpus is large *and*
+        signature analysis would actually save LLM budget.
+        """
+        threshold = int(getattr(self.config, "hierarchical_min_files", 500) or 500)
+        if len(entries) < threshold:
+            return False
+        # Cheap probe — same signature pass we'd run anyway.
+        clusters, long_tail = cluster_files(
+            entries, min_cluster_size=int(
+                getattr(self.config, "cluster_min_size", 3) or 3
+            ),
+        )
+        ratio = collapse_ratio(len(entries), clusters, len(long_tail))
+        # Worth it only if collapse drops cost meaningfully (≤ 60 %).
+        decision = ratio <= 0.6
+        log.info(
+            "hierarchical decision: %d files → %d clusters + %d long-tail "
+            "(ratio %.2f) → %s",
+            len(entries), len(clusters), len(long_tail), ratio,
+            "hierarchical" if decision else "fallthrough",
+        )
+        return decision
+
+    def _hierarchical_plan(
+        self, entries: list[FileEntry], progress: Optional[ProgressCB]
+    ) -> dict:
+        """Three steps: cluster → ask LLM about reps → propagate."""
+        cluster_min = int(getattr(self.config, "cluster_min_size", 3) or 3)
+        reps_per = int(getattr(self.config, "reps_per_cluster", 2) or 2)
+        clusters, long_tail = cluster_files(entries, min_cluster_size=cluster_min)
+
+        # 1) Build the representative bag (a stand-in mini-corpus).
+        rep_entries: list[FileEntry] = []
+        rep_to_cluster: dict[Path, Cluster] = {}
+        for c in clusters:
+            for r in c.representatives(reps_per):
+                rep_entries.append(r)
+                rep_to_cluster[r.path] = c
+        # Add long-tail singletons directly so they get classified too.
+        rep_entries.extend(long_tail)
+
+        if not rep_entries:
+            # nothing to do
+            return {"categories": [], "assignments": []}
+
+        # 2) Ask the LLM (single call when reps fit; micro-batch fallback
+        #    if the rep bag itself is too big).
+        per_file_cap = min(self.config.max_excerpt_chars, 1200)
+        rep_payloads: list[dict] = []
+        for e in rep_entries:
+            d = e.to_summary_dict()
+            d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
+            rep_payloads.append(d)
+
+        if progress:
+            progress(
+                f"plan: 대표 {len(rep_entries)}개로 단일 호출 시도 "
+                f"(원본 {len(entries)}개)",
+                0.25,
+            )
+        try:
+            llm_out = self._single_call_plan(rep_payloads, progress)
+        except Exception as exc:
+            log.warning("hierarchical: single-call on reps failed (%s) — micro-batch", exc)
+            if progress:
+                progress("plan: 대표 micro-batch fallback", 0.5)
+            llm_out = self._microbatch_plan(rep_payloads, progress)
+
+        categories_raw: list[dict] = list(llm_out.get("categories") or [])
+        rep_assignments: list[dict] = list(llm_out.get("assignments") or [])
+
+        # 3) Build a quick lookup from rep path → assignment so we can
+        #    propagate to every cluster member.
+        assign_by_rep_path: dict[str, dict] = {}
+        for a in rep_assignments:
+            p = str(a.get("path") or "")
+            if p:
+                assign_by_rep_path[p] = a
+        # Fallback: lookup by basename when an LLM rewrote the path.
+        assign_by_basename: dict[str, dict] = {}
+        for a in rep_assignments:
+            name = Path(str(a.get("path") or "")).name
+            if name:
+                assign_by_basename.setdefault(name, a)
+
+        all_assignments: list[dict] = []
+        for c in clusters:
+            # Pick the strongest rep assignment for this cluster (one
+            # whose path matches a member; otherwise first by basename).
+            chosen: Optional[dict] = None
+            for r in c.members:
+                a = assign_by_rep_path.get(str(r.path)) or assign_by_basename.get(r.name)
+                if a is not None:
+                    chosen = a
+                    break
+            if chosen is None:
+                # Cluster's reps weren't classified — leave members for
+                # the time-based / misc fallback that runs in
+                # _plan_from_dict.
+                continue
+            cat_id = chosen.get("primary") or "misc"
+            score = float(chosen.get("primary_score", 0.6) or 0.6)
+            secondary = chosen.get("secondary") or []
+            reason = (
+                chosen.get("reason")
+                or "클러스터 대표 분류 상속"
+            )
+            for m in c.members:
+                all_assignments.append({
+                    "path": str(m.path),
+                    "primary": cat_id,
+                    "primary_score": score,
+                    "secondary": secondary,
+                    "reason": reason if str(m.path) == str(chosen.get("path"))
+                              else f"동일 패턴 클러스터 자동 상속 — {reason}",
+                })
+
+        # Long-tail rep assignments come straight through.
+        for e in long_tail:
+            a = assign_by_rep_path.get(str(e.path)) or assign_by_basename.get(e.name)
+            if a is not None:
+                all_assignments.append(a)
+
+        if progress:
+            progress(
+                f"plan: 클러스터 {len(clusters)} → 대표 분류 → 멤버 {len(entries)}명 자동 상속",
+                0.92,
+            )
+        return {"categories": categories_raw, "assignments": all_assignments}
 
     # ------------------------------------------------------------------
     def _heartbeat_for(self, label: str, progress: Optional[ProgressCB]):

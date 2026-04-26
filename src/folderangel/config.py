@@ -163,6 +163,11 @@ class Config:
     # template / tool overhead).  A 1-call plan needs to fit the prompt
     # *and* the JSON it produces.
     response_token_budget: int = 4096
+    # Hierarchical (large-corpus) planner thresholds.  See
+    # docs/LARGE_CORPUS.md.
+    hierarchical_min_files: int = 500   # below this: never hierarchical
+    cluster_min_size: int = 3           # signature seen this many times → cluster
+    reps_per_cluster: int = 2           # representatives sampled per cluster
 
     # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
     # Phi-4-mini-reasoning style models.

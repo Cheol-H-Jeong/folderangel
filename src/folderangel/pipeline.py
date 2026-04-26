@@ -9,12 +9,16 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
-from .config import Config, get_api_key
+import concurrent.futures as _futures
+import os
+
+from .config import Config, default_paths, get_api_key
 from .index import IndexDB
 from .llm import make_llm_client
 from .metadata import collect
 from .models import FileEntry, LLMUsage, OperationResult, Plan
 from .organizer import Organizer
+from .parser_cache import ParserCache
 from .parsers import extract_excerpt
 from .planner import Planner
 from .reporter import emit_markdown
@@ -42,8 +46,17 @@ def gather_entries(
     )
     if progress:
         progress(f"scan: {len(paths)}개 파일 발견", 0.05)
-    entries: list[FileEntry] = []
-    for idx, p in enumerate(paths, 1):
+    # Persistent excerpt cache so unchanged files skip parsing on
+    # subsequent runs.  Keyed by (path, mtime, size).
+    cache = ParserCache(default_paths().root / "parser_cache.db")
+
+    # Parallel parser pool: parsing is IO + CPU bound and the existing
+    # extract_excerpt already uses its own time-bounded ThreadPool, so a
+    # modest worker count here parallelises across files cleanly.
+    workers = max(2, min(8, (os.cpu_count() or 4)))
+
+    def _parse_one(idx_p: tuple[int, "Path"]) -> Optional[FileEntry]:
+        idx, p = idx_p
         if cancel_check is not None and cancel_check():
             raise RuntimeError("canceled by user")
         if progress:
@@ -53,12 +66,39 @@ def gather_entries(
         except Exception as exc:
             log.warning("metadata failed %s: %s", p, exc)
             if progress:
-                progress(f"  ⚠ 메타데이터 실패: {p.name} ({exc})", idx / max(1, len(paths)))
-            continue
-        entry.content_excerpt = extract_excerpt(
-            p, max_chars=config.max_excerpt_chars, timeout=config.parse_timeout_s
-        )
-        entries.append(entry)
+                progress(
+                    f"  ⚠ 메타데이터 실패: {p.name} ({exc})",
+                    idx / max(1, len(paths)),
+                )
+            return None
+        try:
+            entry.content_excerpt = cache.get_or_parse(
+                entry.path, entry.modified.timestamp(), entry.size,
+                lambda: extract_excerpt(
+                    entry.path,
+                    max_chars=config.max_excerpt_chars,
+                    timeout=config.parse_timeout_s,
+                ),
+            )
+        except Exception as exc:
+            log.debug("cache lookup failed for %s: %s", p, exc)
+            entry.content_excerpt = extract_excerpt(
+                entry.path,
+                max_chars=config.max_excerpt_chars,
+                timeout=config.parse_timeout_s,
+            )
+        return entry
+
+    entries: list[FileEntry] = []
+    try:
+        with _futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="folderangel-pipeline"
+        ) as pool:
+            for entry in pool.map(_parse_one, enumerate(paths, 1), chunksize=4):
+                if entry is not None:
+                    entries.append(entry)
+    finally:
+        cache.close()
     return entries
 
 
