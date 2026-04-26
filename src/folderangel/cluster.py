@@ -64,11 +64,18 @@ _TOKEN_SPLIT_RE = re.compile(r"[\s_\-\.,()\[\]{}<>]+")
 _SIG_PREFIX_LEN = 2
 
 
+_PARENS_RE = re.compile(r"\([^()]{1,16}\)")
+
+
 def _strip(name: str) -> str:
     """Remove version / date / seq / decoration noise from a filename."""
     s = unicodedata.normalize("NFC", name)
     s = _DECORATION_RE.sub("", s)
     s = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", s)  # extension
+    # Short parenthetical noise (writer name, code marker etc.) almost
+    # never carries project identity — drop it before kiwi sees the
+    # filename, so e.g. "(정철현) KTX 지출경비" turns into "KTX 지출경비".
+    s = _PARENS_RE.sub(" ", s)
     s = _DATE_RE.sub(" ", s)
     s = _VERSION_RE.sub(" ", s)
     s = _SEQ_RE.sub(" ", s)
@@ -94,20 +101,49 @@ def _tokenise(stripped: str) -> list[str]:
     return out
 
 
-def signature(name: str) -> str:
+def signature(name: str, body_excerpt: str = "") -> str:
     """Stable hashable key that collapses members of the same family.
 
-    Two filenames that only differ by version / date / sequence /
-    decoration / writer-suffix produce the same signature.  We use
-    the first ``_SIG_PREFIX_LEN`` meaningful tokens — real-world
-    business filenames lead with the project / customer name and
-    follow it with version / writer / period detail that we want to
-    discard for clustering.
+    Pulls *project / agency / system nouns* out of the filename via
+    ``folderangel.morph`` (Korean morpheme analyser, kiwi-based, with a
+    character-class fallback) and uses up to ``_SIG_PREFIX_LEN`` of
+    them as the key.
+
+    ``body_excerpt`` (the first ~1,000 chars of the document body) is
+    used as a tie-breaker / extender: when the filename alone produces
+    fewer than ``_SIG_PREFIX_LEN`` keepable nouns, we top up from the
+    most common nouns in the body.  This rescues files like
+    ``재무제표_2024.xlsx`` whose filename is one short noun, and
+    ``(정철현) KTX 변경이용...`` where the filename leads with a
+    person name but the body talks about the actual project.
     """
-    tokens = _tokenise(_strip(name))
-    if not tokens:
+    from . import morph
+
+    head = _DECORATION_RE.sub("", name)
+    head = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", head)
+    head = _PARENS_RE.sub(" ", head)   # writer-name parentheticals
+    head = _DATE_RE.sub(" ", head)
+    head = _VERSION_RE.sub(" ", head)
+    head = _SEQ_RE.sub(" ", head)
+
+    nouns = morph.extract_nouns(head)
+    # Drop any noun that's also in the noise list — kiwi keeps generic
+    # clerical terms that we want gone.
+    nouns = [n for n in nouns if n not in _NOISE_TOKENS]
+
+    if len(nouns) < _SIG_PREFIX_LEN and body_excerpt:
+        body_nouns = morph.extract_nouns(body_excerpt[:1000], top_k=8)
+        body_nouns = [n for n in body_nouns if n not in _NOISE_TOKENS]
+        for n in body_nouns:
+            if n in nouns:
+                continue
+            nouns.append(n)
+            if len(nouns) >= _SIG_PREFIX_LEN:
+                break
+
+    if not nouns:
         return ""
-    return " ".join(tokens[:_SIG_PREFIX_LEN])
+    return " ".join(nouns[:_SIG_PREFIX_LEN])
 
 
 # ----- clustering ----------------------------------------------------------
@@ -160,7 +196,7 @@ def cluster_files(
     """
     buckets: dict[str, list[FileEntry]] = defaultdict(list)
     for e in entries:
-        sig = signature(e.name) or "_singleton_"
+        sig = signature(e.name, e.content_excerpt or "") or "_singleton_"
         buckets[sig].append(e)
 
     clusters: list[Cluster] = []

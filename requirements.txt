@@ -6,4 +6,5 @@ openpyxl>=3.1
 olefile>=0.46
 keyring>=24.0
 requests>=2.31
+kiwipiepy>=0.18
 pywin32>=306; platform_system=="Windows"

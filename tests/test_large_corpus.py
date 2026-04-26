@@ -72,11 +72,25 @@ def test_collapse_ratio_drops_for_large_repetitive_corpus():
     # 50 distinct projects × 100 versions each = 5,000 files, very
     # repetitive on purpose.
     base_ts = 1700000000.0
+    # 50 distinct project names whose Korean morpheme-tokenisation
+    # yields a different first-noun for each project.  Without that
+    # the signatures collapse to one cluster (which would be the
+    # *correct* answer for that input but defeats the purpose of the
+    # test).
+    proj_names = [
+        "프로젝트", "사업", "과제", "정책", "연구", "교육", "마케팅",
+        "재무", "영업", "기술", "운영", "전략", "기획", "지원", "관리",
+        "개발", "분석", "평가", "검토", "도입", "확산", "보안", "구축",
+        "조사", "조달", "수행", "컨설팅", "협력", "교류", "혁신",
+        "표준", "인증", "예산", "감사", "내부", "외부", "정보",
+        "데이터", "통신", "네트워크", "플랫폼", "서비스", "콘텐츠",
+        "프로그램", "이벤트", "실증", "검증", "행정", "투자", "리서치",
+    ]
+    assert len(proj_names) == len(set(proj_names)) >= 50
     for proj in range(50):
-        proj_word = f"customer{proj:02d}"
         for version in range(100):
             entries.append(_entry(
-                f"한국전산_{proj_word}_v{version}.pdf",
+                f"{proj_names[proj]}_보고서_v{version}.pdf",
                 ts=base_ts + proj * 10000 + version * 60,
             ))
     clusters, long_tail = cluster_files(entries, min_cluster_size=3)
@@ -112,7 +126,7 @@ class _FakeClient:
         cats: list[dict] = []
         assigns: list[dict] = []
         for name in names:
-            m = re.match(r"알파_고유([A-Za-z]+)_v\d+\.pdf", name)
+            m = re.match(r"([A-Za-z]+)_제안서_v\d+\.pdf", name)
             if m:
                 cid = f"proj-{m.group(1)}"
             else:
@@ -153,7 +167,7 @@ def test_hierarchical_propagates_rep_assignment_to_all_members():
     for proj in range(5):
         for ver in range(20):
             entries.append(_entry(
-                f"알파_고유{names[proj]}_v{ver}.pdf",
+                f"{names[proj]}_제안서_v{ver}.pdf",
                 ts=base_ts + proj * 10000 + ver * 60,
             ))
 

@@ -32,6 +32,7 @@ dependencies = [
     "olefile>=0.46",
     "keyring>=24.0",
     "requests>=2.31",
+    "kiwipiepy>=0.18",
 ]
 
 [project.optional-dependencies]
