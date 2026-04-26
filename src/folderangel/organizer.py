@@ -271,6 +271,13 @@ def _humanise_skip_reason(exc: BaseException, path: Path) -> str:
     if isinstance(exc, KeyError):
         return f"분류 카테고리를 찾지 못함 ({exc.args[0] if exc.args else '?'})"
     msg = str(exc).strip()
+    low = msg.lower()
+    if "not been decrypted" in low or "encrypted" in low:
+        return "암호화된 파일 (비밀번호 필요)"
+    if "is not a zip file" in low or "bad zip" in low:
+        return "손상된 압축 파일"
+    if "no such file" in low or "missing" in low:
+        return "원본 파일이 사라짐"
     # Avoid using the bare path as the message — it looks like data.
     if msg == str(path) or not msg:
         return f"{type(exc).__name__}"
