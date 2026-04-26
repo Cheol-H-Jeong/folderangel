@@ -215,7 +215,9 @@ class OrganizeView(QtWidgets.QWidget):
         self.btn_primary.setDisabled(running)
         self.btn_cancel.setVisible(running)
         if running:
+            self._frozen_after_cancel = False
             self.report_card.setVisible(False)
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.stage_ind.reset()
             self.progress_label.setText("시작 중…")
@@ -223,11 +225,25 @@ class OrganizeView(QtWidgets.QWidget):
             self._set_toast(None)
 
     def show_canceling(self):
+        # The user clicked Cancel.  Freeze the visible progress *now* —
+        # don't wait for the worker thread to wind itself down.  We:
+        #   (a) flip the bar back to determinate 0 so the marquee stops,
+        #   (b) reset stage indicator pills to neutral,
+        #   (c) show the cancellation toast,
+        #   (d) ignore any subsequent stage/status events so they can't
+        #       re-start the marquee or push another "토큰 수신 중…" line.
+        self._frozen_after_cancel = True
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.stage_ind.reset()
+        self.progress_label.setText("취소 요청됨 — 진행 중인 호출을 정리하는 중…")
         self._set_toast(("warn", "취소 요청됨", "현재 단계가 안전하게 멈출 때까지 잠시만요…"))
 
     def show_canceled(self):
         self.set_running(False)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.stage_ind.reset()
         self.progress_label.setText("취소되었습니다.")
         self._set_toast(("info", "정리를 취소했습니다", "이미 옮긴 파일은 그대로 유지됩니다. 다시 시작할 수 있습니다."))
 
@@ -256,10 +272,13 @@ class OrganizeView(QtWidgets.QWidget):
         self._toast.setVisible(True)
 
     def on_stage(self, stage: str, pct: float):
+        # After cancel, drop any in-flight stage events so the marquee
+        # bar / stage pills don't keep moving while the worker thread
+        # finishes unwinding.
+        if getattr(self, "_frozen_after_cancel", False):
+            return
         self.stage_ind.set_active(stage)
         if pct < 0:
-            # Indeterminate — show a busy/marquee bar so the user can see
-            # the app is still alive during long LLM calls.
             self.progress_bar.setRange(0, 0)
         else:
             if self.progress_bar.maximum() == 0:
@@ -267,14 +286,14 @@ class OrganizeView(QtWidgets.QWidget):
             self.progress_bar.setValue(max(0, min(100, int(pct * 100))))
 
     def on_status(self, text: str):
-        # Single short label up top + line-by-line tail in the log view.
+        if getattr(self, "_frozen_after_cancel", False):
+            return
         head = text if len(text) <= 90 else text[:87] + "…"
         self.progress_label.setText(head)
         from datetime import datetime as _dt
 
         ts = _dt.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{ts}] {text}")
-        # auto-scroll to bottom
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -640,26 +659,36 @@ class SettingsView(QtWidgets.QWidget):
             "https://api.openai.com/v1 · http://localhost:11434/v1"
         )
         self.edit_base_url.setText((self.config.llm_base_url or "").strip())
-        self.edit_base_url.textChanged.connect(lambda _t: self._refresh_status())
+        self.edit_base_url.textChanged.connect(self._on_endpoint_changed)
         f1.addRow("API 엔드포인트", self.edit_base_url)
 
-        # 2) Model — presetted but editable.
+        # 2) Model — auto-detected from the endpoint when possible.
+        # Most non-Gemini providers serve exactly one model per endpoint
+        # (Ollama runs one tag, vLLM serves one --model, llama-server
+        # serves one --alias, etc.) so the user shouldn't have to type
+        # it in.  We probe ``GET {url}/models``; if the endpoint lists
+        # one model we lock the field to it; if several, show them as
+        # a drop-down; if zero, fall back to a free-text editor.
         self.cmb_model = QtWidgets.QComboBox()
         self.cmb_model.setEditable(True)
-        self.cmb_model.addItems([
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gpt-4o-mini",
-            "gpt-4o",
-            "claude-3-5-sonnet",
-            "claude-3-5-haiku",
-            "qwen2.5-72b-instruct",
-            "qwen3.6-35b-a3b",
-            "llama-3.1-70b-instruct",
-        ])
-        self.cmb_model.setCurrentText(self.config.model or "gemini-2.5-flash")
+        if self.config.model:
+            self.cmb_model.addItem(self.config.model)
+            self.cmb_model.setCurrentText(self.config.model)
         self.cmb_model.editTextChanged.connect(lambda _t: self._refresh_status())
-        f1.addRow("모델", self.cmb_model)
+        self.lbl_model_help = QtWidgets.QLabel("")
+        self.lbl_model_help.setStyleSheet("color:#6e6e73;font-size:11px;")
+        model_wrap = QtWidgets.QWidget()
+        mv = QtWidgets.QVBoxLayout(model_wrap)
+        mv.setContentsMargins(0, 0, 0, 0)
+        mv.setSpacing(2)
+        mv.addWidget(self.cmb_model)
+        mv.addWidget(self.lbl_model_help)
+        f1.addRow("모델", model_wrap)
+        # debounce model auto-detect on URL / key edits
+        self._probe_timer = QtCore.QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.setInterval(400)
+        self._probe_timer.timeout.connect(self._auto_detect_models)
 
         # 3) API key — masked, with inline save / delete.
         self.edit_key = QtWidgets.QLineEdit()
@@ -724,8 +753,10 @@ class SettingsView(QtWidgets.QWidget):
         v.addStretch(1)
 
         # Initial render: populate the API-key placeholder with what we
-        # currently have and update the status line.
+        # currently have, update the status line, and probe the
+        # endpoint once to fill in the model list automatically.
         self._refresh_status()
+        QtCore.QTimer.singleShot(0, self._auto_detect_models)
 
     # ------------------------------------------------------------------
     # Single connection card — provider type is inferred from the URL,
@@ -737,6 +768,87 @@ class SettingsView(QtWidgets.QWidget):
             self.edit_base_url.text().strip(),
             self.cmb_model.currentText().strip(),
         )
+
+    def _on_endpoint_changed(self, _t: str) -> None:
+        self._refresh_status()
+        self._probe_timer.start()
+
+    def _auto_detect_models(self) -> None:
+        """Ask the configured endpoint what models it serves and adapt
+        the model widget accordingly.
+
+        Most non-Gemini endpoints serve exactly one model — in that
+        case we lock the field to that id and tell the user.  If the
+        endpoint advertises several, show them as a drop-down.  If the
+        probe fails or returns nothing, fall back to free-text entry
+        (Gemini is treated this way too: it serves many models so the
+        editable preset list is the right UX).
+        """
+        from ..llm.client import list_models, infer_provider_from_url
+        from ..config import get_api_key
+
+        url = self.edit_base_url.text().strip()
+        provider = infer_provider_from_url(url, self.cmb_model.currentText().strip())
+        # Gemini's /models lists ~30 entries — too noisy.  Keep the
+        # preset behaviour for Gemini and only auto-detect for
+        # OpenAI-compat endpoints (where single-model setups are
+        # common: Ollama, vLLM, llama-server, ...).
+        if provider == "gemini":
+            self._set_gemini_presets()
+            return
+
+        key = get_api_key(self.config, provider=provider) or ""
+        models = list_models(url, key) if url else []
+
+        self.cmb_model.blockSignals(True)
+        current = self.cmb_model.currentText().strip()
+        self.cmb_model.clear()
+        if len(models) == 1:
+            only = models[0]
+            self.cmb_model.addItem(only)
+            self.cmb_model.setCurrentText(only)
+            self.cmb_model.setEditable(False)
+            self.lbl_model_help.setText(
+                f"엔드포인트가 단일 모델 ‘{only}’ 만 제공해서 자동 선택했습니다."
+            )
+        elif len(models) > 1:
+            self.cmb_model.setEditable(False)
+            self.cmb_model.addItems(models)
+            if current in models:
+                self.cmb_model.setCurrentText(current)
+            self.lbl_model_help.setText(
+                f"엔드포인트가 제공하는 {len(models)}개 모델 중에서 선택하세요."
+            )
+        else:
+            self.cmb_model.setEditable(True)
+            if current:
+                self.cmb_model.addItem(current)
+            self.cmb_model.setCurrentText(current)
+            if url:
+                self.lbl_model_help.setText(
+                    "엔드포인트에서 모델 목록을 받지 못했습니다. 모델 ID를 직접 입력해 주세요."
+                )
+            else:
+                self.lbl_model_help.setText("")
+        self.cmb_model.blockSignals(False)
+        self._refresh_status()
+
+    def _set_gemini_presets(self) -> None:
+        presets = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-lite",
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+        ]
+        current = self.cmb_model.currentText().strip() or presets[0]
+        self.cmb_model.blockSignals(True)
+        self.cmb_model.setEditable(True)
+        self.cmb_model.clear()
+        self.cmb_model.addItems(presets)
+        self.cmb_model.setCurrentText(current)
+        self.cmb_model.blockSignals(False)
+        self.lbl_model_help.setText("Gemini는 한 엔드포인트에서 여러 모델을 선택할 수 있습니다.")
 
     def _refresh_status(self) -> None:
         from ..config import get_api_key, provider_label, Config
@@ -773,11 +885,12 @@ class SettingsView(QtWidgets.QWidget):
         secure = set_api_key(key, self.config, provider=provider)
         self.edit_key.clear()
         if not secure:
-            # Inline note rather than a popup, matches the rest of the card.
             self.lbl_status.setText("키가 저장됐지만 keyring을 못 찾아 config.json 평문에 들어갔습니다.")
             self.lbl_status.setStyleSheet("color:#a07000;font-size:12px;")
         else:
             self._refresh_status()
+        # New key may unlock the /models probe — re-detect.
+        QtCore.QTimer.singleShot(0, self._auto_detect_models)
         self.config_changed.emit()
 
     def _clear_key(self):

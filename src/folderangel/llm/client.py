@@ -39,6 +39,39 @@ class LLMError(RuntimeError):
     pass
 
 
+def list_models(base_url: str, api_key: str) -> list[str]:
+    """Probe ``GET {base_url}/models`` and return the model ids the
+    endpoint advertises.  Empty list on any failure.
+
+    Works for OpenAI, OpenRouter, Together, Groq, Anthropic-via-gateway,
+    Ollama, vLLM, LM Studio, llama.cpp's HTTP server — every shape we
+    ship: each returns a list of objects with either ``id`` or
+    ``name``.  Single-model endpoints typically return exactly one id,
+    in which case the UI can populate the field automatically.
+    """
+    if not base_url:
+        return []
+    url = base_url.rstrip("/") + "/models"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        r = requests.get(url, headers=headers, timeout=(5.0, 5.0))
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return []
+    raw = data.get("data") or data.get("models") or []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, dict):
+            mid = item.get("id") or item.get("name") or ""
+            if mid:
+                out.append(str(mid))
+        elif isinstance(item, str):
+            out.append(item)
+    return out
+
+
 def infer_provider_from_url(base_url: str, model: str = "") -> str:
     """Pick the right transport from the user-supplied API endpoint.
 
