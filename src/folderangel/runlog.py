@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import re
 import sys
 import threading
 import traceback
@@ -29,11 +30,63 @@ _active_path: Optional[Path] = None
 _install_count = 0
 
 
+# Patterns we MUST never write to disk.  Hits anywhere in a log record
+# (message, args, exception text) are replaced before reaching the file.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
+    # Google AI Studio API keys: "AIza" + 35 chars
+    (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "[REDACTED_KEY]"),
+    # OpenAI / generic "sk-…" tokens (covers sk-, sk-proj-, sk-ant-, …)
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"), "[REDACTED_KEY]"),
+    # Bearer tokens in Authorization headers
+    (
+        re.compile(r"(?i)Authorization:\s*Bearer\s+[A-Za-z0-9_\-.=]+"),
+        "Authorization: Bearer [REDACTED]",
+    ),
+    # ?key=… / &key=… query strings (Google APIs put the key here)
+    (re.compile(r"(?i)([?&]key=)[A-Za-z0-9_\-]+"), r"\1[REDACTED]"),
+    # Generic api_key=… / api-key=… / X-Api-Key: …
+    (
+        re.compile(r"(?i)(api[_\-]?key\s*[:=]\s*['\"]?)[A-Za-z0-9_\-]{12,}"),
+        r"\1[REDACTED]",
+    ),
+    # Long hex tokens (matches the local llama-server style)
+    (re.compile(r"\b[0-9a-f]{48,}\b"), "[REDACTED_KEY]"),
+)
+
+
+def _redact(text: str) -> str:
+    if not text or not isinstance(text, str):
+        return text
+    out = text
+    for pat, replacement in _SECRET_PATTERNS:
+        out = pat.sub(replacement, out)
+    return out
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Strips API keys / bearer tokens from every log record before
+    they land in the file.  Defence-in-depth against accidental leaks
+    even when a caller logs an Authorization header verbatim.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redact(super().format(record))
+
+
 def _format_handler() -> logging.Formatter:
-    return logging.Formatter(
+    return _RedactingFormatter(
         fmt="%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def _silence_chatty_third_parties() -> None:
+    """Demote loggers that tend to dump URLs (containing ``?key=``) and
+    full request bodies at DEBUG level to WARNING.  Defence-in-depth on
+    top of the formatter-level redaction.
+    """
+    for name in ("urllib3", "urllib3.connectionpool", "requests", "PIL"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def start_session(tag: str = "session") -> Path:
@@ -82,6 +135,7 @@ def start_session(tag: str = "session") -> Path:
             sys.excepthook = _hook
             _install_count += 1
 
+        _silence_chatty_third_parties()
         _active_handler = handler
         _active_path = log_file
         logging.getLogger("folderangel.runlog").info(
