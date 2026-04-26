@@ -204,6 +204,16 @@ def test_tier_picker_picks_correct_tier():
     medium = [_entry(f"alpha_보고서_v{i}.pdf") for i in range(80)]
     assert p._pick_tier(medium) == "medium"
 
+
+def test_tier_picker_uses_count_only_not_collapse():
+    """User-test policy: file count alone decides the tier.  Even a
+    100+ corpus where every filename is unique (no signature collapse)
+    must still be classified ``large`` so the hierarchical path runs."""
+    cfg = Config()
+    p = Planner(cfg, gemini=_FakeClient())
+    entries = [_entry(f"distinct_{i}_보고서_v0.pdf") for i in range(119)]
+    assert p._pick_tier(entries) == "large"
+
     # 50 distinct projects × 100 versions = 5,000 → large
     proj_names = [
         "프로젝트", "사업", "과제", "정책", "연구", "교육", "마케팅",

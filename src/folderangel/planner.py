@@ -648,32 +648,27 @@ class Planner:
     # ------------------------------------------------------------------
     def _pick_tier(self, entries: list[FileEntry]) -> str:
         """Return ``"small"``, ``"medium"``, or ``"large"`` based on
-        the file count and (for large) whether signature clustering
-        actually saves enough to justify the lossy path.
+        the file count alone.
+
+        File count is the user-visible knob; we honour it strictly so
+        that "100개 이상부터 새로운 모드" is what actually happens.
+        Even when signature clustering collapses poorly, the
+        hierarchical path still works: every member that doesn't fit
+        a cluster falls into long-tail and the LLM looks at it
+        individually.  The hierarchical body itself logs the
+        collapse ratio and any internal fallback.
         """
         n = len(entries)
-        small_threshold = int(getattr(self.config, "small_corpus_files", 200) or 200)
-        large_threshold = int(getattr(self.config, "hierarchical_min_files", 500) or 500)
+        small_threshold = int(getattr(self.config, "small_corpus_files", 60) or 60)
+        large_threshold = int(getattr(self.config, "hierarchical_min_files", 100) or 100)
         if n < small_threshold:
-            return "small"
-        if n < large_threshold:
-            return "medium"
-        # Hierarchical only makes sense when the signatures collapse
-        # enough — otherwise the cost saving is too small.  Fall back
-        # to medium when the collapse ratio is poor.
-        clusters, long_tail = cluster_files(
-            entries, min_cluster_size=int(
-                getattr(self.config, "cluster_min_size", 3) or 3
-            ),
-        )
-        ratio = collapse_ratio(n, clusters, len(long_tail))
-        log.info(
-            "tier decision: %d files → %d clusters + %d long-tail "
-            "(ratio %.2f) → %s",
-            n, len(clusters), len(long_tail), ratio,
-            "large" if ratio <= 0.6 else "medium (no collapse)",
-        )
-        return "large" if ratio <= 0.6 else "medium"
+            tier = "small"
+        elif n < large_threshold:
+            tier = "medium"
+        else:
+            tier = "large"
+        log.info("tier decision: %d files → %s", n, tier)
+        return tier
 
     def _tier_announcement(self, tier: str, n: int) -> str:
         """A single human-readable line that explains what the planner
