@@ -191,6 +191,97 @@ def test_hierarchical_propagates_rep_assignment_to_all_members():
     assert all(v == 20 for v in expected.values()), expected
 
 
+def test_embedding_first_cluster_groups_by_body(tmp_path):
+    """Two filenames whose tokens differ but whose bodies talk about
+    the same project should now end up in one cluster — option F."""
+    from folderangel.cluster import cluster_files
+
+    body_alpha = "범정부 초거대 AI 공통기반 사업 BPR/ISP 추진 계획"
+    body_alpha2 = "초거대 AI 공통기반 BPR_ISP 작업 보고서"
+    entries = [
+        _entry("한국지역정보개발원_제안발표_v1.pptx", content=body_alpha),
+        _entry("투이컨설팅_제안발표_v2.pptx", content=body_alpha2),
+        _entry("공통기반_플랫폼_v1.pdf", content=body_alpha),
+    ]
+    clusters, long_tail = cluster_files(entries, min_cluster_size=2,
+                                        primary_embedding=True)
+    # Only one cluster of three semantically-related files (assuming
+    # sklearn is available; if not, the test still asserts no crash).
+    assert sum(c.size for c in clusters) + len(long_tail) == 3
+    # All three should be in *some* cluster of size ≥ 2 if sklearn is on.
+    sizes = sorted([c.size for c in clusters], reverse=True)
+    assert sizes[:1] == [3] or sizes[:1] == [2]  # 2 acceptable when fallback
+
+
+def test_outlier_demoted_to_individual_classification(tmp_path):
+    """A cluster member whose body looks unrelated to the rep should
+    be sent for individual LLM classification, not blindly inherit
+    the rep's category."""
+    from folderangel.planner import Planner
+
+    cfg = Config()
+    cfg.hierarchical_min_files = 5
+    cfg.cluster_min_size = 2
+    cfg.reps_per_cluster = 2
+    cfg.outlier_min_similarity = 0.30
+
+    seen_extra: list[list[dict]] = []
+
+    class _Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_json(self, prompt, **_kw):
+            self.calls += 1
+            # First call: hand back the project category.
+            if self.calls == 1:
+                return {
+                    "categories": [{"id": "proj", "name": "ProjectX",
+                                    "group": 1, "duration": "annual"}],
+                    "assignments": [
+                        {"path": "/work/proj_v1.pdf", "primary": "proj",
+                         "primary_score": 0.9, "secondary": [],
+                         "reason": "rep"},
+                        {"path": "/work/proj_v2.pdf", "primary": "proj",
+                         "primary_score": 0.9, "secondary": [],
+                         "reason": "rep"},
+                    ],
+                }
+            # Subsequent call: outlier individual re-classify.
+            data = {"assignments": [
+                {"path": "/work/something_else.pdf", "primary": "proj",
+                 "primary_score": 0.5, "secondary": [], "reason": "outlier-fallback"},
+            ]}
+            seen_extra.append(data["assignments"])
+            return data
+
+    fake = _Fake()
+    p = Planner(cfg, gemini=fake)
+    entries = [
+        _entry("proj_v1.pdf", ts=1700000000.0, content="ProjectX summary v1"),
+        _entry("proj_v2.pdf", ts=1700000050.0, content="ProjectX summary v2"),
+        _entry("proj_v3.pdf", ts=1700000100.0, content="ProjectX summary v3"),
+        # outlier — same filename pattern, totally different body
+        _entry("something_else.pdf", ts=1700000150.0,
+               content="totally unrelated topic about cooking recipes ramen"),
+    ]
+    plan = p.plan(entries)
+
+    # Find the outlier's assignment.  It must NOT carry the
+    # "동일 패턴 클러스터 자동 상속 — rep" reason of the proj cluster
+    # — that would mean the outlier inherited a category it doesn't
+    # actually belong to.  Either it was demoted to individual
+    # classification (extra LLM call) or it landed in long-tail
+    # singletons.
+    outlier_assigns = [a for a in plan.assignments
+                       if a.file_path.name == "something_else.pdf"]
+    assert outlier_assigns, "outlier missing from plan"
+    reason = outlier_assigns[0].reason or ""
+    assert "자동 상속" not in reason, (
+        f"outlier inherited cluster category: {reason!r}"
+    )
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to

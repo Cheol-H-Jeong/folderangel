@@ -177,6 +177,11 @@ class Config:
     hierarchical_min_files: int = 100   # ≥ this: try hierarchical first
     cluster_min_size: int = 3           # signature seen this many times → cluster
     reps_per_cluster: int = 2           # representatives sampled per cluster
+    # When the rep's body and a cluster member's body fall below this
+    # cosine similarity, the member is *not* propagated to the rep's
+    # category — it gets re-classified by the LLM individually.
+    # 0 disables the outlier check entirely.
+    outlier_min_similarity: float = 0.30
 
     # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
     # Phi-4-mini-reasoning style models.

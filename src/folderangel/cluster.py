@@ -188,6 +188,8 @@ def cluster_files(
     *,
     semantic_merge: bool = True,
     semantic_threshold: float = 0.55,
+    primary_embedding: bool = True,
+    primary_embedding_threshold: float = 0.50,
 ) -> tuple[list[Cluster], list[FileEntry]]:
     """Group entries by their filename signature, then optionally merge
     semantically-similar small clusters / long-tail items.
@@ -210,18 +212,33 @@ def cluster_files(
     The result has the same shape as before so callers don't need to
     change.
     """
-    buckets: dict[str, list[FileEntry]] = defaultdict(list)
-    for e in entries:
-        sig = signature(e.name, e.content_excerpt or "") or "_singleton_"
-        buckets[sig].append(e)
+    entries = list(entries)
 
-    clusters: list[Cluster] = []
-    long_tail: list[FileEntry] = []
-    for sig, members in buckets.items():
-        if len(members) >= min_cluster_size:
-            clusters.append(Cluster(signature=sig, members=members))
-        else:
-            long_tail.extend(members)
+    if primary_embedding and entries:
+        # ── Stage 1A: file-body + filename embeddings ──────────────────
+        # Group by cosine similarity of (filename + first 600 chars of
+        # body) so that two files belonging to the same project end up
+        # in the same cluster even when their tokenised filenames don't
+        # share the first two nouns.  Falls back to signature buckets
+        # when no embedding backend is available.
+        clusters, long_tail = _embedding_first_cluster(
+            entries,
+            threshold=primary_embedding_threshold,
+            min_cluster_size=min_cluster_size,
+        )
+    else:
+        clusters, long_tail = _signature_buckets(entries, min_cluster_size)
+
+    # ── Stage 1B: top-up with signature buckets ────────────────────────
+    # Even when embeddings clustered well, run the signature pass so
+    # that tightly-named families merge into the same cluster.  Each
+    # signature bucket joins the cluster that already contains the
+    # majority of its members; if it doesn't overlap any cluster, the
+    # signature bucket itself becomes a new cluster.
+    if entries:
+        clusters, long_tail = _merge_signature_buckets(
+            clusters, long_tail, entries, min_cluster_size=min_cluster_size
+        )
 
     if semantic_merge and (clusters or long_tail):
         clusters, long_tail = _semantic_merge(
@@ -231,6 +248,108 @@ def cluster_files(
 
     clusters.sort(key=lambda c: c.size, reverse=True)
     return clusters, long_tail
+
+
+def _signature_buckets(
+    entries: list[FileEntry], min_cluster_size: int
+) -> tuple[list[Cluster], list[FileEntry]]:
+    buckets: dict[str, list[FileEntry]] = defaultdict(list)
+    for e in entries:
+        sig = signature(e.name, e.content_excerpt or "") or "_singleton_"
+        buckets[sig].append(e)
+    clusters: list[Cluster] = []
+    long_tail: list[FileEntry] = []
+    for sig, members in buckets.items():
+        if len(members) >= min_cluster_size:
+            clusters.append(Cluster(signature=sig, members=members))
+        else:
+            long_tail.extend(members)
+    return clusters, long_tail
+
+
+def _embedding_first_cluster(
+    entries: list[FileEntry],
+    *,
+    threshold: float,
+    min_cluster_size: int,
+) -> tuple[list[Cluster], list[FileEntry]]:
+    """Cosine-merge entries directly on their (filename + body) docs.
+
+    Yields the same ``(clusters, long_tail)`` shape as the signature
+    bucketer.  When the embedding backend isn't available (no sklearn
+    and no sentence-transformers) we fall back to the signature path
+    so the planner always gets a usable result.
+    """
+    from . import embed as _embed
+
+    if _embed.backend_label() == "none":
+        return _signature_buckets(entries, min_cluster_size)
+
+    docs = [_doc_for(e) for e in entries]
+    groups = _embed.merge_by_similarity(docs, threshold=threshold)
+
+    clusters: list[Cluster] = []
+    long_tail: list[FileEntry] = []
+    for g in groups:
+        members = [entries[i] for i in g]
+        if len(members) >= min_cluster_size:
+            sig = signature(members[0].name, members[0].content_excerpt or "") \
+                or f"emb-{len(clusters)}"
+            clusters.append(Cluster(signature=sig, members=members))
+        else:
+            long_tail.extend(members)
+    return clusters, long_tail
+
+
+def _merge_signature_buckets(
+    clusters: list[Cluster],
+    long_tail: list[FileEntry],
+    entries: list[FileEntry],
+    *,
+    min_cluster_size: int,
+) -> tuple[list[Cluster], list[FileEntry]]:
+    """Each signature bucket whose members are scattered across multiple
+    embedding clusters gets pulled toward whichever existing cluster
+    holds the *plurality* of those members.  Signature buckets that
+    only intersect long-tail items become their own new cluster."""
+    sig_buckets, _ = _signature_buckets(entries, min_cluster_size=2)
+    if not sig_buckets:
+        return clusters, long_tail
+
+    member_to_cluster: dict[Path, int] = {}
+    for ci, c in enumerate(clusters):
+        for m in c.members:
+            member_to_cluster[m.path] = ci
+
+    long_tail_set = {m.path for m in long_tail}
+    new_clusters = list(clusters)
+
+    for sb in sig_buckets:
+        owners: dict[int, int] = {}
+        in_long_tail = 0
+        for m in sb.members:
+            ci = member_to_cluster.get(m.path)
+            if ci is not None:
+                owners[ci] = owners.get(ci, 0) + 1
+            elif m.path in long_tail_set:
+                in_long_tail += 1
+        if not owners and in_long_tail >= min_cluster_size:
+            new_clusters.append(
+                Cluster(signature=sb.signature, members=list(sb.members))
+            )
+            for m in sb.members:
+                long_tail_set.discard(m.path)
+            continue
+        if owners:
+            best_ci = max(owners, key=owners.get)
+            for m in sb.members:
+                if m.path in long_tail_set:
+                    new_clusters[best_ci].members.append(m)
+                    long_tail_set.discard(m.path)
+                    member_to_cluster[m.path] = best_ci
+
+    new_long_tail = [m for m in long_tail if m.path in long_tail_set]
+    return new_clusters, new_long_tail
 
 
 def _doc_for(entry: FileEntry) -> str:

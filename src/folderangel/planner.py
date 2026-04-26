@@ -107,6 +107,32 @@ def _guess_by_time(entry, cats):
     return best
 
 
+def _doc_for_cluster_member(entry: FileEntry) -> str:
+    body = (entry.content_excerpt or "")[:600]
+    return f"{entry.name}\n{body}"
+
+
+def _cosine_to_ref(ref_doc: str, docs: list[str]) -> list[Optional[float]]:
+    """Cosine similarity of every doc against the ref.  Returns ``None``
+    for entries when no embedding backend is available — caller treats
+    those as "skip outlier check"."""
+    from . import embed as _embed
+    if _embed.backend_label() == "none" or not docs:
+        return [None] * len(docs)
+    vecs = _embed.embed([ref_doc] + docs)
+    if vecs is None or len(vecs) < 2:
+        return [None] * len(docs)
+    import numpy as _np
+    ref = vecs[0]
+    rest = vecs[1:]
+    n_ref = _np.linalg.norm(ref) or 1.0
+    out: list[Optional[float]] = []
+    for r in rest:
+        n_r = _np.linalg.norm(r) or 1.0
+        out.append(float((ref @ r) / (n_ref * n_r)))
+    return out
+
+
 def _safe_path_repr(path_str: str, is_mojibake) -> str:
     """Redact pre-existing mojibake folder names from a path before we
     show it to the LLM.
@@ -815,34 +841,44 @@ class Planner:
                 assign_by_basename.setdefault(name, a)
 
         all_assignments: list[dict] = []
+        outliers: list[FileEntry] = []
+        from . import embed as _embed
+        outlier_thresh = float(getattr(self.config, "outlier_min_similarity", 0.30) or 0.30)
+
         for c in clusters:
-            # Pick the strongest rep assignment for this cluster (one
-            # whose path matches a member; otherwise first by basename).
+            # Pick the strongest rep assignment for this cluster.
             chosen: Optional[dict] = None
+            chosen_member: Optional[FileEntry] = None
             for r in c.members:
                 a = assign_by_rep_path.get(str(r.path)) or assign_by_basename.get(r.name)
                 if a is not None:
                     chosen = a
+                    chosen_member = r
                     break
             if chosen is None:
-                # Cluster's reps weren't classified — leave members for
-                # the time-based / misc fallback that runs in
-                # _plan_from_dict.
                 continue
             cat_id = chosen.get("primary") or "misc"
             score = float(chosen.get("primary_score", 0.6) or 0.6)
             secondary = chosen.get("secondary") or []
-            reason = (
-                chosen.get("reason")
-                or "클러스터 대표 분류 상속"
-            )
-            for m in c.members:
+            reason = chosen.get("reason") or "클러스터 대표 분류 상속"
+
+            # Outlier check: members whose body looks materially
+            # different from the rep's body get demoted to long-tail
+            # so the LLM classifies them individually.  Skips when no
+            # embedding backend is available (degrades gracefully).
+            ref_doc = _doc_for_cluster_member(chosen_member or c.members[0])
+            check_docs = [_doc_for_cluster_member(m) for m in c.members]
+            sims = _cosine_to_ref(ref_doc, check_docs)
+            for m, sim in zip(c.members, sims):
+                if sim is not None and sim < outlier_thresh and len(c.members) > 1:
+                    outliers.append(m)
+                    continue
                 all_assignments.append({
                     "path": str(m.path),
                     "primary": cat_id,
                     "primary_score": score,
                     "secondary": secondary,
-                    "reason": reason if str(m.path) == str(chosen.get("path"))
+                    "reason": reason if (chosen_member and str(m.path) == str(chosen_member.path))
                               else f"동일 패턴 클러스터 자동 상속 — {reason}",
                 })
 
@@ -852,9 +888,35 @@ class Planner:
             if a is not None:
                 all_assignments.append(a)
 
+        # Outliers: re-classify with a small extra LLM call so they
+        # don't get stuck in the wrong cluster's category.  If even
+        # that fails or no LLM is available, _plan_from_dict's
+        # time-based rescue kicks in via the misc fallback.
+        if outliers:
+            if progress:
+                progress(
+                    f"plan: outlier {len(outliers)}개 추가 분류 — 클러스터 본문과 다른 멤버",
+                    0.88,
+                )
+            try:
+                payloads_out: list[dict] = []
+                for e in outliers:
+                    d = e.to_summary_dict()
+                    d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
+                    payloads_out.append(d)
+                extra = self._stage_b_call(payloads_out, categories_raw, progress)
+                for a in extra:
+                    a.setdefault("reason", "")
+                    a["reason"] = (a.get("reason") or "") + " · outlier 재분류"
+                    all_assignments.append(a)
+            except Exception as exc:
+                log.warning("outlier re-classify failed (%s) — leaving to misc fallback", exc)
+                # leave the outliers to be picked up by _plan_from_dict's
+                # time-based / misc rescue.
+
         if progress:
             progress(
-                f"plan: 클러스터 {len(clusters)} → 대표 분류 → 멤버 {len(entries)}명 자동 상속",
+                f"plan: 클러스터 {len(clusters)} → 대표 분류 → 멤버 {len(entries) - len(outliers)}명 자동 상속, outlier {len(outliers)}명 개별 분류",
                 0.92,
             )
         return {"categories": categories_raw, "assignments": all_assignments}
