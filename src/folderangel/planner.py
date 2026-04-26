@@ -168,6 +168,125 @@ def _safe_path_repr(path_str: str, is_mojibake, *, anonymise_parents: bool = Fal
     return str(Path(*redacted))
 
 
+# ----- opaque-filename detector + keyword-overlap veto --------------------
+#
+# Pre-Pass-1 safety net.  Filenames that carry zero project identity
+# (pure numerics, random hashes, IMG_*, raw camera/screen captures)
+# must never be classified by the filename-only LLM pass — there is
+# nothing in the name for the LLM to anchor to, and past runs showed
+# the LLM happily lumping these into the most-active project category.
+# We force them straight into the deferred bag so the body-aware
+# pipeline gets to look at content (or, for unparseable media, route
+# them to a dedicated 미디어 자료 bucket).
+_OPAQUE_NAME_PATTERNS = [
+    re.compile(r"^\s*\d{2,}\s*$"),                       # 1152, 1767000341906
+    re.compile(r"^[A-Za-z0-9_\-]{18,}$"),                # random hashes / base64-ish
+    re.compile(r"^IMG[_\-]?\d+", re.IGNORECASE),         # phone camera
+    re.compile(r"^DSC[_\-]?\d+", re.IGNORECASE),         # DSLR camera
+    re.compile(r"^Screenshot[_\- ]", re.IGNORECASE),
+    re.compile(r"^Screen[_\- ]?Shot[_\- ]", re.IGNORECASE),
+    re.compile(r"^Recording[_\- ]?\d+", re.IGNORECASE),
+    re.compile(r"^Untitled[_\- ]?\d*", re.IGNORECASE),
+    re.compile(r"^새\s*문서", re.IGNORECASE),
+    re.compile(r"^무제[_\- ]?\d*", re.IGNORECASE),
+]
+_MEDIA_EXTS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",
+    ".jpg", ".jpeg", ".png", ".gif", ".heic", ".webp", ".bmp", ".tiff",
+}
+
+
+def _is_opaque_filename(name: str, ext: str = "") -> bool:
+    """A filename so generic / opaque that the filename-only LLM pass
+    would just guess.  Includes pure-numeric, random-hash, camera
+    auto-names, and media files whose stem has no meaningful tokens."""
+    if not name:
+        return True
+    stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", name).strip()
+    if not stem:
+        return True
+    for pat in _OPAQUE_NAME_PATTERNS:
+        if pat.match(stem):
+            return True
+    e = (ext or "").lower()
+    if not e:
+        m = re.search(r"\.([A-Za-z0-9]{1,5})$", name)
+        e = "." + m.group(1).lower() if m else ""
+    if e in _MEDIA_EXTS:
+        # Media file: only trust the filename if the stem contains a
+        # meaningful (non-numeric, non-IMG_*) token that could carry
+        # project identity.  Bare "IMG_xxxx" / "video123" → opaque.
+        meaningful = re.findall(r"[A-Za-z가-힣]{3,}", stem)
+        meaningful = [
+            t for t in meaningful
+            if not re.fullmatch(r"(?:IMG|DSC|VID|REC|MOV|SCR|TMP)[A-Za-z]*", t, re.IGNORECASE)
+        ]
+        if not meaningful:
+            return True
+    return False
+
+
+def _filename_tokens(name: str) -> set[str]:
+    """Substantive tokens from a filename for the keyword-overlap veto.
+
+    Strip the extension, split on common separators, lowercase, drop
+    pure-numeric and 1-char tokens, and drop the filename-pattern
+    noise (``IMG``, ``DSC``, ``v1``, etc.).  Korean tokens are kept
+    only when they are 2+ chars.
+    """
+    stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", name or "")
+    raw = re.split(r"[\s_\-\.,()\[\]{}<>]+", stem)
+    out: set[str] = set()
+    for t in raw:
+        t = t.strip().casefold()
+        if not t or t.isdigit() or len(t) < 2:
+            continue
+        if re.fullmatch(r"v\d+|r\d+|[ivxlcdm]+", t):
+            continue
+        if t in {"img", "dsc", "vid", "rec", "mov", "scr", "tmp", "pdf",
+                 "docx", "pptx", "xlsx", "hwp", "txt", "csv", "json", "xml",
+                 "copy", "of", "fin", "final", "draft", "ver", "version"}:
+            continue
+        out.add(t)
+    return out
+
+
+def _category_tokens(category: dict) -> set[str]:
+    """Substantive tokens from a category's name + keywords + description."""
+    parts: list[str] = []
+    for k in ("name", "description"):
+        v = category.get(k)
+        if isinstance(v, str):
+            parts.append(v)
+    kws = category.get("keywords") or []
+    if isinstance(kws, list):
+        parts.extend(str(k) for k in kws if k)
+    return _filename_tokens(" ".join(parts))
+
+
+def _tokens_overlap(file_toks: set[str], cat_toks: set[str]) -> bool:
+    """Permissive overlap: exact match OR substring containment OR
+    common 4-character prefix.  Tolerates real-world variants like
+    "projx" vs "projectx" and "한국지역정보개발원" vs "한국지역" while
+    still vetoing unrelated tokens like "rtx" vs "한양대".
+    """
+    if not file_toks or not cat_toks:
+        return False
+    if file_toks & cat_toks:
+        return True
+    for ft in file_toks:
+        if len(ft) < 3:
+            continue
+        for ct in cat_toks:
+            if len(ct) < 3:
+                continue
+            if ft in ct or ct in ft:
+                return True
+            if len(ft) >= 4 and len(ct) >= 4 and ft[:4] == ct[:4]:
+                return True
+    return False
+
+
 def _strip_payload(files: list[dict]) -> list[dict]:
     """Drop the heaviest fields so a small-context model has room.
 
@@ -1207,19 +1326,36 @@ class Planner:
         ``None`` if the LLM call hard-failed (caller falls through
         to the regular pipeline).
         """
-        # Strip every payload down to filename-only for the prompt.
-        # The path field is preserved (already anonymised by the
-        # caller) so we can match assignments back to entries.
-        slim = [
-            {
-                "path": d.get("path") or "",
-                "name": d.get("name") or "",
-                "ext": d.get("ext") or "",
-            }
-            for d in payloads
-        ]
+        # Pre-filter: opaque filenames (pure numeric, random hash,
+        # camera-auto-name, raw media) carry zero project identity in
+        # their name.  Sending them to the filename-only LLM pass just
+        # invites the model to guess — past runs dumped them into the
+        # most-active project category.  Force them straight to the
+        # deferred bag so the body-aware pipeline gets to look at them.
+        slim: list[dict] = []
+        forced_deferred: list[str] = []
+        for d in payloads:
+            name = d.get("name") or ""
+            ext = d.get("ext") or ""
+            if _is_opaque_filename(name, ext):
+                forced_deferred.append(d.get("path") or "")
+                continue
+            slim.append(
+                {
+                    "path": d.get("path") or "",
+                    "name": name,
+                    "ext": ext,
+                }
+            )
+        if forced_deferred and progress:
+            progress(
+                f"plan: 파일명 패스 — 불투명 파일명 {len(forced_deferred)}개 "
+                f"즉시 deferred (숫자만/해시/IMG_*/미디어)",
+                0.17,
+            )
         if not slim:
-            return None
+            # Every file was opaque — defer everything.
+            return {"categories": [], "assignments": [], "deferred": forced_deferred}
 
         # Cap chunk size so a corpus of ~5,000 filenames stays within
         # any modern context window.  ~50 chars/file × 200 files ≈
@@ -1234,7 +1370,7 @@ class Planner:
 
         agg_cats: list[dict] = []
         agg_assigns: list[dict] = []
-        agg_deferred: list[str] = []
+        agg_deferred: list[str] = list(forced_deferred)
         seen_cat_ids: set[str] = set()
         for idx, chunk in enumerate(chunks, 1):
             prompt = prompts.build_filename_first_pass(
@@ -1273,13 +1409,89 @@ class Planner:
                         continue
                     agg_cats.append(c)
                     seen_cat_ids.add(cid)
+            # Build a {category_id: token-set} index from this chunk's
+            # categories AND every category we've seen so far.  The
+            # keyword-overlap veto runs against this index so an
+            # assignment is only kept when the filename shares at
+            # least one substantive token with its target category.
+            cat_tokens_by_id: dict[str, set[str]] = {}
+            cat_by_id: dict[str, dict] = {}
+            for c in agg_cats:
+                cid = (c.get("id") or "").strip()
+                if not cid:
+                    continue
+                cat_by_id[cid] = c
+                cat_tokens_by_id[cid] = _category_tokens(c)
+            # Match payloads to their original name so we can score
+            # the overlap.  ``chunk`` is the slim-payload list for
+            # this iteration; build path → name AND basename → name
+            # so an LLM that rewrites the anonymised path back can
+            # still be matched.
+            name_by_key: dict[str, str] = {}
+            for d in chunk:
+                p = d.get("path") or ""
+                n = d.get("name") or ""
+                if p:
+                    name_by_key[p] = n
+                if n:
+                    name_by_key[n] = n
+                    name_by_key[Path(p).name] = n if p else name_by_key.get(n, n)
             if isinstance(assigns, list):
                 for a in assigns:
+                    p = str(a.get("path") or "")
+                    cid = (a.get("primary") or "").strip()
+                    fname = (
+                        name_by_key.get(p)
+                        or name_by_key.get(Path(p).name)
+                        or ""
+                    )
+                    cat_toks = cat_tokens_by_id.get(cid, set())
+                    file_toks = _filename_tokens(fname) if fname else set()
+                    overlap = _tokens_overlap(file_toks, cat_toks)
+                    score = float(a.get("primary_score") or 0.0)
+                    if not cid or not cat_toks or not file_toks or not overlap:
+                        # Veto: no token overlap (or no category found
+                        # in catalogue yet).  Force this file into the
+                        # deferred bag — body content will get a fair
+                        # second look in Pass 2.
+                        if p:
+                            agg_deferred.append(p)
+                        continue
+                    if score and score < 0.7:
+                        # LLM itself flagged low confidence — defer.
+                        if p:
+                            agg_deferred.append(p)
+                        continue
                     a.setdefault("reason", "")
                     a["reason"] = (a.get("reason") or "") + " · 파일명 패스"
                     agg_assigns.append(a)
             if isinstance(deferred, list):
                 agg_deferred.extend(str(p) for p in deferred if p)
+
+            # Safety net: any file in this chunk that the LLM did NOT
+            # mention in either assignments or deferred would otherwise
+            # be silently dropped.  Auto-defer those so the body-aware
+            # pipeline still gets to look at them.  Index mentioned
+            # files by both full path AND basename so paths the LLM
+            # rewrote still get recognised.
+            mentioned_paths: set[str] = set()
+            mentioned_names: set[str] = set()
+            for source in (assigns, deferred):
+                if not isinstance(source, list):
+                    continue
+                for item in source:
+                    rp = str(item.get("path") if isinstance(item, dict) else item or "")
+                    if not rp:
+                        continue
+                    mentioned_paths.add(rp)
+                    mentioned_names.add(Path(rp).name)
+            for d in chunk:
+                p = d.get("path") or ""
+                if not p:
+                    continue
+                if p in mentioned_paths or Path(p).name in mentioned_names:
+                    continue
+                agg_deferred.append(p)
 
         if not agg_cats and not agg_assigns:
             return None  # complete miss → caller falls through

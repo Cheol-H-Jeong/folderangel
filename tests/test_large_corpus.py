@@ -465,6 +465,114 @@ def test_reclassify_filename_first_pass_then_body_pass(tmp_path):
     assert yk and yk[0].primary_category_id == "insurance-policy"
 
 
+def test_opaque_filenames_force_deferred_in_filename_pass(tmp_path):
+    """The exact files the user reported wrongly landed in
+    "한양대 인간-인공지능 협업 제품서비스 설계":
+      - 1152.PDF                   pure numeric
+      - 1767000341906.pdf          pure numeric (timestamp-like)
+      - 4aL6Fv3rfd1N2lTHeCvhROHBhuY.mp4   random hash
+      - IMG_8933.jpeg              camera auto-name
+    Must never reach the filename LLM call — they carry no project
+    identity in their name and the LLM was lumping them into the
+    most-active project category."""
+    from folderangel.planner import _is_opaque_filename
+
+    assert _is_opaque_filename("1152.PDF", ".pdf")
+    assert _is_opaque_filename("1767000341906.pdf", ".pdf")
+    assert _is_opaque_filename("4aL6Fv3rfd1N2lTHeCvhROHBhuY.mp4", ".mp4")
+    assert _is_opaque_filename("IMG_8933.jpeg", ".jpeg")
+    # Counter-examples — these have real project signals.
+    assert not _is_opaque_filename(
+        "한국지역정보개발원_제안발표.pptx", ".pptx"
+    )
+    assert not _is_opaque_filename(
+        "RTX PRO 6000 GPU 3대 구매 계약.pdf", ".pdf"
+    )
+    assert not _is_opaque_filename("projx_overview.pdf", ".pdf")
+
+
+def test_filename_pass_keyword_overlap_veto_demotes_to_deferred(tmp_path):
+    """When the LLM confidently assigns a file but the filename has
+    zero substantive token overlap with the target category, the
+    veto must demote that file to deferred so the body-aware pass
+    gets a fair shot at it.
+
+    Reproduces "RTX PRO 6000 GPU 3대 구매 계약.pdf" being shoved into
+    한양대 협업 — the GPU contract has zero overlap with the
+    한양대/협업/인공지능 keyword set, so it must defer."""
+    cfg = Config()
+    cfg.reclassify_mode = True
+    cfg.small_corpus_files = 3
+    cfg.hierarchical_min_files = 100
+    cfg.cluster_min_size = 2
+    cfg.reps_per_cluster = 2
+
+    class _Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_json(self, prompt, **_kw):
+            self.calls += 1
+            if self.calls == 1:
+                # LLM tries to confidently shove the GPU file into
+                # the 한양대 category.  The veto must catch this.
+                return {
+                    "categories": [
+                        {"id": "hanyang-ai", "name": "한양대 인간-인공지능 협업 제품서비스 설계",
+                         "keywords": ["한양대", "협업", "인공지능"],
+                         "group": 1, "duration": "annual"},
+                    ],
+                    "assignments": [
+                        {"path": "/work/한양대_협업_발표.pptx",
+                         "primary": "hanyang-ai", "primary_score": 0.9,
+                         "secondary": [], "reason": "파일명에 한양대"},
+                        {"path": "/work/RTX PRO 6000 GPU 3대 구매 계약.pdf",
+                         "primary": "hanyang-ai", "primary_score": 0.9,
+                         "secondary": [], "reason": "AI 연구용 GPU"},
+                    ],
+                    "deferred": [],
+                }
+            # Pass 2 (body-aware) returns a proper procurement category.
+            return {
+                "categories": [
+                    {"id": "gpu-procure", "name": "GPU 구매·계약",
+                     "group": 2, "duration": "mixed"},
+                ],
+                "assignments": [
+                    {"path": "/work/RTX PRO 6000 GPU 3대 구매 계약.pdf",
+                     "primary": "gpu-procure", "primary_score": 0.9,
+                     "secondary": [], "reason": "본문이 구매 계약"},
+                ],
+            }
+
+    fake = _Fake()
+    p = Planner(cfg, gemini=fake)
+    entries = [
+        _entry("한양대_협업_발표.pptx", ts=1700000000.0,
+               content="한양대 인간-AI 협업 제품서비스 설계 발표"),
+        _entry("RTX PRO 6000 GPU 3대 구매 계약.pdf", ts=1700000050.0,
+               content="발주처 매수인 RTX PRO 6000 단가 납품 계약"),
+        _entry("협업_가이드라인.docx", ts=1700000100.0,
+               content="협업 절차 가이드"),
+        _entry("AI 협업 결과보고.pdf", ts=1700000150.0,
+               content="협업 결과 정리"),
+    ]
+    plan = p.plan(entries)
+
+    # The legitimately-named one must land in hanyang-ai.
+    hy = [a for a in plan.assignments if a.file_path.name == "한양대_협업_발표.pptx"]
+    assert hy and hy[0].primary_category_id == "hanyang-ai"
+
+    # The GPU contract must NOT have inherited hanyang-ai via Pass 1.
+    gpu = [a for a in plan.assignments
+           if a.file_path.name == "RTX PRO 6000 GPU 3대 구매 계약.pdf"]
+    assert gpu, "GPU file disappeared"
+    assert gpu[0].primary_category_id != "hanyang-ai", (
+        f"keyword-overlap veto failed — GPU file still in 한양대: "
+        f"{gpu[0].primary_category_id}"
+    )
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to
