@@ -163,9 +163,18 @@ class Config:
     # template / tool overhead).  A 1-call plan needs to fit the prompt
     # *and* the JSON it produces.
     response_token_budget: int = 4096
-    # Hierarchical (large-corpus) planner thresholds.  See
-    # docs/LARGE_CORPUS.md.
-    hierarchical_min_files: int = 500   # below this: never hierarchical
+    # Tiered planning thresholds.  See docs/LARGE_CORPUS.md.
+    #   < small_corpus_files          → "small" tier  (single LLM call)
+    #   < hierarchical_min_files       → "medium" tier (micro-batch)
+    #   ≥ hierarchical_min_files       → "large" tier  (hierarchical),
+    #                                    falling back to "medium" if
+    #                                    signature collapse < 40 %.
+    # Defaults are intentionally aggressive on the user-test side so
+    # the hierarchical path engages from ~100 files; tweak upward in
+    # real usage if you'd rather pay the medium-tier cost on more
+    # corpora.
+    small_corpus_files: int = 60        # ≤ this: single LLM call
+    hierarchical_min_files: int = 100   # ≥ this: try hierarchical first
     cluster_min_size: int = 3           # signature seen this many times → cluster
     reps_per_cluster: int = 2           # representatives sampled per cluster
 

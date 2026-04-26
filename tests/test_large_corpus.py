@@ -157,6 +157,7 @@ def test_hierarchical_propagates_rep_assignment_to_all_members():
         * place every member of cluster N into category proj-N.
     """
     cfg = Config()
+    cfg.small_corpus_files = 10      # so 100 files isn't "small"
     cfg.hierarchical_min_files = 50  # force hierarchical at this size
     cfg.cluster_min_size = 3
     cfg.economy_max_files = 200      # let single-call attempt fit
@@ -188,6 +189,45 @@ def test_hierarchical_propagates_rep_assignment_to_all_members():
         if a.primary_category_id in expected:
             expected[a.primary_category_id] += 1
     assert all(v == 20 for v in expected.values()), expected
+
+
+def test_tier_picker_picks_correct_tier():
+    cfg = Config()
+    # Use the production defaults so this test catches regressions to
+    # the user-test thresholds (small ≤ 60, large ≥ 100).
+    p = Planner(cfg, gemini=_FakeClient())
+
+    small = [_entry(f"alpha_보고서_v{i}.pdf") for i in range(20)]
+    assert p._pick_tier(small) == "small"
+
+    # 80 files: above small (60) but below large (100) → medium
+    medium = [_entry(f"alpha_보고서_v{i}.pdf") for i in range(80)]
+    assert p._pick_tier(medium) == "medium"
+
+    # 50 distinct projects × 100 versions = 5,000 → large
+    proj_names = [
+        "프로젝트", "사업", "과제", "정책", "연구", "교육", "마케팅",
+        "재무", "영업", "기술", "운영", "전략", "기획", "지원", "관리",
+        "개발", "분석", "평가", "검토", "도입", "확산", "보안", "구축",
+        "조사", "조달", "수행", "컨설팅", "협력", "교류", "혁신",
+        "표준", "인증", "예산", "감사", "내부", "외부", "정보",
+        "데이터", "통신", "네트워크", "플랫폼", "서비스", "콘텐츠",
+        "프로그램", "이벤트", "실증", "검증", "행정", "투자", "리서치",
+    ]
+    large = [_entry(f"{proj_names[i]}_보고서_v{j}.pdf")
+             for i in range(50) for j in range(100)]
+    assert p._pick_tier(large) == "large"
+
+
+def test_tier_announcement_describes_chosen_mode():
+    cfg = Config()
+    p = Planner(cfg, gemini=_FakeClient())
+    msg = p._tier_announcement("small", 50)
+    assert "소규모" in msg and "50" in msg and "한 번" in msg
+    msg = p._tier_announcement("medium", 350)
+    assert "중간" in msg and "micro-batch" in msg
+    msg = p._tier_announcement("large", 5000)
+    assert "대규모" in msg and "5000" in msg and "대표" in msg
 
 
 def test_hierarchical_skipped_for_small_corpora():

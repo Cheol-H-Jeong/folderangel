@@ -296,15 +296,39 @@ class Planner:
             return _plan_from_dict(plan_dict, entries)
 
         # ------------------------------------------------------------------
-        # Hierarchical (large-corpus) path: collapse files to filename
-        # signature clusters and only ask the LLM about cluster
-        # representatives, then propagate the assignment to every
-        # cluster member.  Sub-linear LLM cost on big folders.  See
-        # docs/LARGE_CORPUS.md.
-        if self._should_use_hierarchical(entries, payloads):
+        # Tiered planning policy — choose the cheapest path that still
+        # gives accurate folders for *this* corpus size.  Ordered from
+        # most LLM-intensive (best quality, fine for ≤ a few hundred
+        # files) to most LLM-frugal (best for thousands).  The user is
+        # told upfront which tier was picked.
+        #
+        #   1. ``small``         < small_corpus_files   single LLM call,
+        #                                              everything goes
+        #                                              into the prompt.
+        #                                              Best quality.
+        #   2. ``medium``        small ≤ N < large     micro-batch — LLM
+        #                                              chunks the corpus
+        #                                              and merges; still
+        #                                              every file gets
+        #                                              individually
+        #                                              looked at.
+        #   3. ``large``         large ≤ N             hierarchical
+        #                                              (signature
+        #                                              clusters →
+        #                                              representatives →
+        #                                              propagate).
+        # ------------------------------------------------------------------
+        tier = self._pick_tier(entries)
+        if progress:
+            progress(self._tier_announcement(tier, len(entries)), 0.16)
+
+        if tier == "large":
             try:
                 if progress:
-                    progress("plan: hierarchical 모드 (대규모 corpus)…", 0.18)
+                    progress(
+                        f"plan: 대규모 모드 — 파일명+본문 시그니처로 묶어 대표만 LLM 호출",
+                        0.2,
+                    )
                 plan_dict = self._hierarchical_plan(entries, progress)
                 return _plan_from_dict(plan_dict, entries)
             except Exception as exc:
@@ -622,6 +646,54 @@ class Planner:
             )
 
     # ------------------------------------------------------------------
+    def _pick_tier(self, entries: list[FileEntry]) -> str:
+        """Return ``"small"``, ``"medium"``, or ``"large"`` based on
+        the file count and (for large) whether signature clustering
+        actually saves enough to justify the lossy path.
+        """
+        n = len(entries)
+        small_threshold = int(getattr(self.config, "small_corpus_files", 200) or 200)
+        large_threshold = int(getattr(self.config, "hierarchical_min_files", 500) or 500)
+        if n < small_threshold:
+            return "small"
+        if n < large_threshold:
+            return "medium"
+        # Hierarchical only makes sense when the signatures collapse
+        # enough — otherwise the cost saving is too small.  Fall back
+        # to medium when the collapse ratio is poor.
+        clusters, long_tail = cluster_files(
+            entries, min_cluster_size=int(
+                getattr(self.config, "cluster_min_size", 3) or 3
+            ),
+        )
+        ratio = collapse_ratio(n, clusters, len(long_tail))
+        log.info(
+            "tier decision: %d files → %d clusters + %d long-tail "
+            "(ratio %.2f) → %s",
+            n, len(clusters), len(long_tail), ratio,
+            "large" if ratio <= 0.6 else "medium (no collapse)",
+        )
+        return "large" if ratio <= 0.6 else "medium"
+
+    def _tier_announcement(self, tier: str, n: int) -> str:
+        """A single human-readable line that explains what the planner
+        is about to do — surfaced to the user via the progress log so
+        they can see the chosen mode and why."""
+        if tier == "small":
+            return (
+                f"plan: 소규모 모드 — {n}개 파일을 한 번의 LLM 호출로 분류합니다 "
+                f"(가장 정확)"
+            )
+        if tier == "medium":
+            return (
+                f"plan: 중간 규모 모드 — {n}개 파일을 micro-batch 로 나눠 "
+                f"여러 번 LLM 호출 (균형형)"
+            )
+        return (
+            f"plan: 대규모 모드 — {n}개 파일을 시그니처로 묶어 대표만 LLM 호출 "
+            f"(가장 비용 효율적)"
+        )
+
     def _should_use_hierarchical(
         self, entries: list[FileEntry], payloads: list[dict]
     ) -> bool:
