@@ -40,7 +40,16 @@ class Category:
     id: str
     name: str
     description: str = ""
-    time_label: str = ""    # e.g. "2024", "2024-Q1", "2024-03" or "" if unknown
+    # Time bucket the LLM picked, free-form but conventional:
+    #   "2024-03" / "2024-Q1" / "2024-H1" / "2024" / "2023–2025"
+    time_label: str = ""
+    # Duration *type* — drives folder-name shape and downstream sorting.
+    #   "burst"     short intense work (a month or so)
+    #   "short"     a quarter / half-year campaign
+    #   "annual"    a one-year project
+    #   "multi-year" multi-year programme
+    #   "mixed"     no meaningful time pattern
+    duration: str = ""
     group: int = 0          # 1..9 — visual grouping prefix; 0 means ungrouped
 
     def to_dict(self) -> dict:

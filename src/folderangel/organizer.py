@@ -101,21 +101,47 @@ _TIME_SUFFIX_RE = re.compile(r"\s*\([^()]+\)\s*$")
 def compose_folder_name(cat: Category, fallback_group: int = 9) -> str:
     """Build the on-disk folder name from a :class:`Category`.
 
-    Convention (always applied): ``"{group}. {name} ({time_label})"`` —
-    every category gets a 1..9 group prefix, and the time suffix appears
-    only when the LLM provided one.  Examples::
+    Convention: ``"{group}. {name} {time-suffix}"`` — every category
+    gets a 1..9 group prefix, and the time-suffix shape is chosen by
+    the LLM-supplied ``duration`` so multi-year programmes look
+    different from a single-month sprint::
 
-        Category("a", "AVOCA 시스템", group=2, time_label="2024-Q3")
+        burst       (2024-03)
+        short       (2024-Q1)
+        annual      (2024)
+        multi-year  〈2023–2025〉   ← angle quotes signal "spans years"
+        mixed       (no suffix)
+
+    Examples:
+
+        Category(name="AVOCA 시스템",                 group=2,
+                 time_label="2024-Q3",  duration="short")
             → "2. AVOCA 시스템 (2024-Q3)"
-        Category("a", "프로젝트 외 자료", group=9, time_label="")
-            → "9. 프로젝트 외 자료"
+
+        Category(name="범정부 초거대 AI 공통기반",      group=1,
+                 time_label="2023–2025", duration="multi-year")
+            → "1. 범정부 초거대 AI 공통기반 〈2023–2025〉"
+
+        Category(name="기타", group=9, time_label="", duration="mixed")
+            → "9. 기타"
     """
     raw = int(cat.group or 0)
     g = raw if 1 <= raw <= 9 else max(1, min(9, fallback_group))
-    pieces = [f"{g}.", cat.name or cat.id]
-    if cat.time_label:
-        pieces.append(f"({cat.time_label})")
+    label = (cat.time_label or "").strip()
+    duration = (cat.duration or "").strip().lower()
+    pieces: list[str] = [f"{g}.", cat.name or cat.id]
+    if label:
+        if duration == "multi-year" or _looks_multiyear(label):
+            # Visual cue that this folder spans multiple years.
+            pieces.append(f"〈{label}〉")
+        else:
+            pieces.append(f"({label})")
     return sanitize_folder_name(" ".join(pieces))
+
+
+def _looks_multiyear(label: str) -> bool:
+    """Heuristic: '2023–2025', '2023~2025', '2023-2025' style → multi-year."""
+    return bool(re.search(r"\d{4}\s*[–~\-]\s*\d{4}", label))
 
 
 def has_group_prefix(name: str) -> bool:

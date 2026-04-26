@@ -80,6 +80,30 @@ def test_shortcut_created_for_secondary(tmp_path):
     assert op.total_shortcuts >= 1
 
 
+def test_compose_folder_name_per_duration():
+    from folderangel.organizer import compose_folder_name
+
+    burst = Category(id="a", name="제안발표", group=2,
+                     time_label="2024-03", duration="burst")
+    short = Category(id="b", name="AVOCA", group=1,
+                     time_label="2024-Q3", duration="short")
+    annual = Category(id="c", name="연간 보고", group=3,
+                      time_label="2024", duration="annual")
+    multi = Category(id="d", name="범정부 초거대 AI 공통기반", group=1,
+                     time_label="2023–2025", duration="multi-year")
+    mixed = Category(id="e", name="기타", group=9,
+                     time_label="", duration="mixed")
+
+    assert compose_folder_name(burst)  == "2. 제안발표 (2024-03)"
+    assert compose_folder_name(short)  == "1. AVOCA (2024-Q3)"
+    assert compose_folder_name(annual) == "3. 연간 보고 (2024)"
+    name_multi = compose_folder_name(multi)
+    assert name_multi.startswith("1. 범정부 초거대 AI 공통기반")
+    # multi-year suffix uses angle quotes to make the span obvious
+    assert "〈2023–2025〉" in name_multi
+    assert compose_folder_name(mixed) == "9. 기타"
+
+
 def test_existing_folder_with_same_core_name_is_reused(tmp_path):
     pre_existing = tmp_path / "AVOCA 시스템"
     pre_existing.mkdir()

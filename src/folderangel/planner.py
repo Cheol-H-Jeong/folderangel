@@ -720,12 +720,20 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
             log.warning("dropping category with corrupt name: %r", raw_name)
             continue
 
+        # Duration type, normalised to one of the known buckets so the
+        # folder-name composer can rely on a closed vocabulary.
+        raw_dur = str(c.get("duration", "") or "").strip().lower()
+        if raw_dur not in {"burst", "short", "annual", "multi-year", "multiyear", "mixed"}:
+            raw_dur = ""
+        if raw_dur == "multiyear":
+            raw_dur = "multi-year"
         cats.append(
             Category(
                 id=str(c.get("id") or "").strip() or raw_name[:24] or f"cat-{len(cats)+1}",
                 name=raw_name or str(c.get("id") or ""),
                 description=raw_desc,
                 time_label=str(c.get("time_label", "") or "").strip(),
+                duration=raw_dur,
                 group=group_val,
             )
         )
