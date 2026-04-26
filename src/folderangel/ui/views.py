@@ -399,6 +399,19 @@ class SearchView(QtWidgets.QWidget):
         v.addLayout(row)
         row.addWidget(self.search, 1)
 
+        # Reindex action — let the user push the current contents of any
+        # folder into the search index without going through a full LLM
+        # organise pass.  Useful when the existing index is stale (older
+        # runs / manual moves / a folder that was never organised).
+        self.btn_reindex = QtWidgets.QPushButton("폴더 다시 인덱싱…")
+        self.btn_reindex.setObjectName("Ghost")
+        self.btn_reindex.setToolTip(
+            "선택한 폴더의 현재 파일 트리를 검색 인덱스에 갱신합니다.\n"
+            "정리 작업 없이도 그 폴더 안 모든 파일을 검색할 수 있습니다."
+        )
+        self.btn_reindex.clicked.connect(self._do_reindex)
+        row.addWidget(self.btn_reindex)
+
         # Live-search: every keystroke triggers a fresh query, debounced
         # by 120 ms so a fast typist doesn't fire a SQL hit per character.
         # Pressing Enter still works for users who expect explicit submit.
@@ -472,6 +485,22 @@ class SearchView(QtWidgets.QWidget):
         if item:
             p = Path(item.text())
             _open_in_explorer(p if p.exists() else p.parent)
+
+    def _do_reindex(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "다시 인덱싱할 폴더 선택",
+            "",
+        )
+        if not d:
+            return
+        n = self.index_db.reindex_folder(Path(d), recursive=True)
+        QtWidgets.QMessageBox.information(
+            self,
+            "인덱싱 완료",
+            f"{n}개 파일을 인덱스에 추가/갱신했습니다.\n이제 검색이 즉시 가능합니다.",
+        )
+        self._do_search()
 
 
 class HistoryView(QtWidgets.QWidget):

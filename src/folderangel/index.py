@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS files (
     filename TEXT NOT NULL,
     folder TEXT NOT NULL,
     category TEXT NOT NULL,
+    category_name TEXT DEFAULT '',
     reason TEXT,
     score REAL,
     content_excerpt TEXT DEFAULT '',
@@ -79,6 +80,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
     filename,
     folder,
     category,
+    category_name,
     reason,
     original_path,
     content_excerpt,
@@ -88,13 +90,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
 );
 
 CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN
-    INSERT INTO files_fts(rowid, filename, folder, category, reason, original_path, content_excerpt)
-    VALUES (new.id, new.filename, new.folder, new.category, coalesce(new.reason, ''), new.original_path, coalesce(new.content_excerpt, ''));
+    INSERT INTO files_fts(rowid, filename, folder, category, category_name, reason, original_path, content_excerpt)
+    VALUES (new.id, new.filename, new.folder, new.category, coalesce(new.category_name, ''), coalesce(new.reason, ''), new.original_path, coalesce(new.content_excerpt, ''));
 END;
 
 CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN
-    INSERT INTO files_fts(files_fts, rowid, filename, folder, category, reason, original_path, content_excerpt)
-    VALUES ('delete', old.id, old.filename, old.folder, old.category, coalesce(old.reason, ''), old.original_path, coalesce(old.content_excerpt, ''));
+    INSERT INTO files_fts(files_fts, rowid, filename, folder, category, category_name, reason, original_path, content_excerpt)
+    VALUES ('delete', old.id, old.filename, old.folder, old.category, coalesce(old.category_name, ''), coalesce(old.reason, ''), old.original_path, coalesce(old.content_excerpt, ''));
 END;
 """
 
@@ -111,7 +113,10 @@ class IndexDB:
 
     def _migrate(self) -> None:
         """Bring an older DB up to the current schema, including a
-        rebuild of the FTS5 virtual table when its column set drifts.
+        rebuild of the FTS5 virtual table when its column set drifts
+        and a back-fill of newly-added columns from existing data
+        sources (e.g. operation stats_json carries the human-readable
+        category names that older runs never wrote into ``files``).
         """
         cur = self.conn.execute("PRAGMA table_info(files)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -119,42 +124,73 @@ class IndexDB:
             self.conn.execute(
                 "ALTER TABLE files ADD COLUMN content_excerpt TEXT DEFAULT ''"
             )
+        if "category_name" not in cols:
+            self.conn.execute(
+                "ALTER TABLE files ADD COLUMN category_name TEXT DEFAULT ''"
+            )
 
-        # If the FTS5 column list is older (no content_excerpt), drop and
-        # rebuild it from the files table — populating from the DB we
-        # already have so old rows become searchable too.
+        # Back-fill category_name from each operation's stats_json.  The
+        # human-readable category title (e.g. "범정부 초거대 AI 공통기반
+        # BPR_ISP") was previously buried in stats; now we lift it onto
+        # every file row so it joins the search index properly.
+        for op in self.conn.execute(
+            "SELECT id, stats_json FROM operations"
+        ).fetchall():
+            try:
+                stats = json.loads(op["stats_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            id_to_name = {
+                c["id"]: c.get("name", "")
+                for c in (stats.get("categories") or [])
+                if c.get("id")
+            }
+            if not id_to_name:
+                continue
+            for cid, cname in id_to_name.items():
+                self.conn.execute(
+                    "UPDATE files SET category_name = ? "
+                    "WHERE op_id = ? AND category = ? AND coalesce(category_name,'') = ''",
+                    (cname, op["id"], cid),
+                )
+
+        # If the FTS5 column list is older (missing content_excerpt or
+        # category_name), drop and rebuild it from the files table —
+        # populating from the DB we already have so old rows become
+        # searchable too.
         cur = self.conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='files_fts'"
         )
         row = cur.fetchone()
         sql = (row["sql"] or "").lower() if row else ""
-        if "content_excerpt" not in sql:
+        needs_rebuild = ("content_excerpt" not in sql) or ("category_name" not in sql)
+        if needs_rebuild:
             self.conn.executescript(
                 """
                 DROP TRIGGER IF EXISTS files_ai;
                 DROP TRIGGER IF EXISTS files_ad;
                 DROP TABLE IF EXISTS files_fts;
                 CREATE VIRTUAL TABLE files_fts USING fts5(
-                    filename, folder, category, reason, original_path,
-                    content_excerpt,
+                    filename, folder, category, category_name, reason,
+                    original_path, content_excerpt,
                     content='files', content_rowid='id',
                     tokenize='unicode61 remove_diacritics 2'
                 );
                 CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
-                  INSERT INTO files_fts(rowid, filename, folder, category, reason, original_path, content_excerpt)
-                  VALUES (new.id, new.filename, new.folder, new.category, coalesce(new.reason, ''), new.original_path, coalesce(new.content_excerpt, ''));
+                  INSERT INTO files_fts(rowid, filename, folder, category, category_name, reason, original_path, content_excerpt)
+                  VALUES (new.id, new.filename, new.folder, new.category, coalesce(new.category_name, ''), coalesce(new.reason, ''), new.original_path, coalesce(new.content_excerpt, ''));
                 END;
                 CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
-                  INSERT INTO files_fts(files_fts, rowid, filename, folder, category, reason, original_path, content_excerpt)
-                  VALUES ('delete', old.id, old.filename, old.folder, old.category, coalesce(old.reason, ''), old.original_path, coalesce(old.content_excerpt, ''));
+                  INSERT INTO files_fts(files_fts, rowid, filename, folder, category, category_name, reason, original_path, content_excerpt)
+                  VALUES ('delete', old.id, old.filename, old.folder, old.category, coalesce(old.category_name, ''), coalesce(old.reason, ''), old.original_path, coalesce(old.content_excerpt, ''));
                 END;
                 """
             )
-            # Backfill FTS from existing rows
             self.conn.execute(
                 """
-                INSERT INTO files_fts(rowid, filename, folder, category, reason, original_path, content_excerpt)
-                SELECT id, filename, folder, category, coalesce(reason,''), original_path, coalesce(content_excerpt,'')
+                INSERT INTO files_fts(rowid, filename, folder, category, category_name, reason, original_path, content_excerpt)
+                SELECT id, filename, folder, category, coalesce(category_name,''),
+                       coalesce(reason,''), original_path, coalesce(content_excerpt,'')
                 FROM files
                 """
             )
@@ -168,6 +204,9 @@ class IndexDB:
             "total_shortcuts": op.total_shortcuts,
             "categories": [c.__dict__ for c in op.categories],
         }
+        # id → human-readable category name, used to keep ``files.category_name``
+        # in sync with what's shown to the user.
+        cat_name_by_id = {c.id: c.name for c in op.categories}
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO operations(target_root, started_at, finished_at, dry_run, stats_json) "
@@ -185,8 +224,8 @@ class IndexDB:
         for mf in op.moved:
             new_path = Path(mf.new_path)
             cur.execute(
-                "INSERT INTO files(op_id, original_path, new_path, filename, folder, category, reason, score, content_excerpt, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO files(op_id, original_path, new_path, filename, folder, category, category_name, reason, score, content_excerpt, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     op_id,
                     str(mf.original_path),
@@ -194,6 +233,7 @@ class IndexDB:
                     new_path.name,
                     str(new_path.parent),
                     mf.category_id,
+                    cat_name_by_id.get(mf.category_id, ""),
                     mf.reason,
                     mf.score,
                     (mf.content_excerpt or "")[:1800],
@@ -211,6 +251,69 @@ class IndexDB:
         return op_id
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    def reindex_folder(self, root: Path, recursive: bool = True) -> int:
+        """Walk *root* on disk and refresh the index for that subtree.
+
+        Use case: the user reorganised manually, or runs the search
+        before kicking off a new organize pass, or simply wants
+        everything under a folder findable without re-running the LLM.
+        We synthesise a special "scan" operation that records every
+        existing file with its current ``new_path`` (= where it lives
+        right now), the parent folder name as ``category_name`` (so
+        searching for the folder name finds the children), and an
+        empty content excerpt — which the next real organize pass will
+        upgrade.  Returns the number of files indexed.
+        """
+        root = Path(root).resolve()
+        if not root.is_dir():
+            return 0
+        # Drop any prior "scan" op for the same root so the index doesn't
+        # accumulate stale duplicates as the user reindexes repeatedly.
+        for old in self.conn.execute(
+            "SELECT id FROM operations WHERE target_root = ? AND "
+            "json_extract(coalesce(stats_json,'{}'), '$.kind') = 'reindex'",
+            (str(root),),
+        ).fetchall():
+            self.conn.execute("DELETE FROM operations WHERE id = ?", (old["id"],))
+
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO operations(target_root, started_at, finished_at, dry_run, stats_json) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (str(root), now, now, json.dumps({"kind": "reindex"})),
+        )
+        op_id = cur.lastrowid
+
+        count = 0
+        iterator = root.rglob("*") if recursive else root.iterdir()
+        for p in iterator:
+            try:
+                if not p.is_file():
+                    continue
+            except OSError:
+                continue
+            parent = p.parent
+            cur.execute(
+                "INSERT INTO files(op_id, original_path, new_path, filename, folder, "
+                "category, category_name, reason, score, content_excerpt, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, '', 1.0, '', ?)",
+                (
+                    op_id,
+                    str(p),                # no prior original path; reuse current
+                    str(p),
+                    p.name,
+                    str(parent),
+                    parent.name,           # category id ≈ parent folder name
+                    parent.name,           # human-readable category = same
+                    now,
+                ),
+            )
+            count += 1
+        self.conn.commit()
+        return count
+
     def search(self, query: str, limit: int = 100) -> list[SearchHit]:
         q = query.strip()
         if not q:
