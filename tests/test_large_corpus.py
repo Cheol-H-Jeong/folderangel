@@ -229,6 +229,19 @@ def test_tier_picker_uses_count_only_not_collapse():
     assert p._pick_tier(large) == "large"
 
 
+def test_mock_mode_still_announces_tier():
+    """Even without an LLM client we should tell the user which tier
+    *would* have been picked, so the file-count → strategy mapping is
+    visible regardless of API key configuration."""
+    cfg = Config()
+    p = Planner(cfg, gemini=None)  # no client → mock path
+    entries = [_entry(f"alpha_보고서_v{i}.pdf") for i in range(120)]
+    seen: list[str] = []
+    p.plan(entries, progress=lambda msg, pct: seen.append(msg))
+    tier_msgs = [m for m in seen if "모드" in m]
+    assert any("대규모" in m for m in tier_msgs), tier_msgs
+
+
 def test_tier_announcement_describes_chosen_mode():
     cfg = Config()
     p = Planner(cfg, gemini=_FakeClient())

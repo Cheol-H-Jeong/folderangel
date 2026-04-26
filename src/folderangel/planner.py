@@ -291,7 +291,12 @@ class Planner:
         # Short-circuit if there's no Gemini client — everything is mock.
         if self.gemini is None:
             if progress:
-                progress("mock-planner", 0.5)
+                # Tell the user which tier *would* have been picked even
+                # in mock mode, so the file-count vs strategy mapping
+                # is visible regardless of whether a key is configured.
+                tier = self._pick_tier(entries)
+                progress(self._tier_announcement(tier, len(entries)), 0.16)
+                progress("mock-planner: API 키 없음 — 휴리스틱으로 분류합니다.", 0.5)
             plan_dict = mock_planner.plan(payloads, self.config.ambiguity_threshold)
             return _plan_from_dict(plan_dict, entries)
 
