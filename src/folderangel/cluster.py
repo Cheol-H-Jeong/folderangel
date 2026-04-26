@@ -183,16 +183,32 @@ class Cluster:
 
 
 def cluster_files(
-    entries: Iterable[FileEntry], min_cluster_size: int = 3
+    entries: Iterable[FileEntry],
+    min_cluster_size: int = 3,
+    *,
+    semantic_merge: bool = True,
+    semantic_threshold: float = 0.55,
 ) -> tuple[list[Cluster], list[FileEntry]]:
-    """Group entries by their filename signature.
+    """Group entries by their filename signature, then optionally merge
+    semantically-similar small clusters / long-tail items.
 
-    Returns ``(clusters, long_tail)``:
-      * clusters    — every signature with ≥ ``min_cluster_size``
-                      members, ordered largest-first.
-      * long_tail   — all other entries (the planner runs them through
-                      the regular per-file path so a singleton's
-                      classification is never compromised).
+    Stage 1 — *signature pass* (always on):
+        bucket every entry by ``signature(name, body)``; signatures with
+        ≥ ``min_cluster_size`` members become clusters, the rest go to
+        long-tail.
+
+    Stage 2 — *semantic merge* (default on, gracefully no-ops when
+    neither sklearn nor sentence-transformers is installed):
+        build a short "doc" string per *cluster centroid* and per
+        *long-tail entry* (filename + first 400 chars of body, all run
+        through the morpheme analyser) and union those whose pairwise
+        cosine similarity ≥ ``semantic_threshold``.  Long-tail entries
+        absorbed into a real cluster join its members; long-tail
+        entries that union together without an existing cluster form a
+        new cluster of their own.
+
+    The result has the same shape as before so callers don't need to
+    change.
     """
     buckets: dict[str, list[FileEntry]] = defaultdict(list)
     for e in entries:
@@ -206,8 +222,97 @@ def cluster_files(
             clusters.append(Cluster(signature=sig, members=members))
         else:
             long_tail.extend(members)
+
+    if semantic_merge and (clusters or long_tail):
+        clusters, long_tail = _semantic_merge(
+            clusters, long_tail, threshold=semantic_threshold,
+            min_cluster_size=min_cluster_size,
+        )
+
     clusters.sort(key=lambda c: c.size, reverse=True)
     return clusters, long_tail
+
+
+def _doc_for(entry: FileEntry) -> str:
+    """Short representative document used by the semantic merger."""
+    body = (entry.content_excerpt or "")[:400]
+    return f"{entry.name}\n{body}"
+
+
+def _doc_for_cluster(c: Cluster) -> str:
+    """Centroid document for a signature cluster — a few member
+    representatives joined together so the cosine vector reflects the
+    cluster as a whole, not just one filename."""
+    parts: list[str] = [c.signature or ""]
+    for m in c.members[:3]:
+        parts.append(_doc_for(m))
+    return "\n".join(parts)
+
+
+def _semantic_merge(
+    clusters: list[Cluster],
+    long_tail: list[FileEntry],
+    *,
+    threshold: float,
+    min_cluster_size: int,
+) -> tuple[list[Cluster], list[FileEntry]]:
+    from . import embed as _embed
+
+    docs: list[str] = []
+    kinds: list[tuple[str, int]] = []  # ("cluster", idx) | ("entry", idx)
+
+    for i, c in enumerate(clusters):
+        docs.append(_doc_for_cluster(c))
+        kinds.append(("cluster", i))
+    for j, e in enumerate(long_tail):
+        docs.append(_doc_for(e))
+        kinds.append(("entry", j))
+
+    if len(docs) < 2:
+        return clusters, long_tail
+
+    backend = _embed.backend_label()
+    if backend == "none":
+        return clusters, long_tail
+
+    groups = _embed.merge_by_similarity(docs, threshold=threshold)
+    if not groups or all(len(g) <= 1 for g in groups):
+        return clusters, long_tail
+
+    # Build the merged structure.  A group containing one or more
+    # ``cluster`` items absorbs every ``entry`` in the same group.
+    # A group of only ``entry`` items becomes a new cluster if it
+    # reaches ``min_cluster_size``; otherwise the entries stay as
+    # long-tail.
+    merged_clusters: list[Cluster] = []
+    new_long_tail: list[FileEntry] = []
+    for group in groups:
+        cluster_idxs = [k for k in group if kinds[k][0] == "cluster"]
+        entry_idxs = [k for k in group if kinds[k][0] == "entry"]
+        if cluster_idxs:
+            # Pick the largest cluster as the seed and absorb the rest.
+            seeds = [clusters[kinds[k][1]] for k in cluster_idxs]
+            seeds.sort(key=lambda c: c.size, reverse=True)
+            seed = seeds[0]
+            for other in seeds[1:]:
+                seed.members.extend(other.members)
+            for k in entry_idxs:
+                seed.members.append(long_tail[kinds[k][1]])
+            merged_clusters.append(seed)
+        else:
+            entries = [long_tail[kinds[k][1]] for k in entry_idxs]
+            if len(entries) >= min_cluster_size:
+                # Synthesise a signature from the most common token in
+                # the group's first noun overlaps, falling back to the
+                # first entry's filename.
+                merged_clusters.append(
+                    Cluster(signature=signature(entries[0].name) or "_merged_",
+                            members=list(entries))
+                )
+            else:
+                new_long_tail.extend(entries)
+
+    return merged_clusters, new_long_tail
 
 
 def collapse_ratio(total_files: int, clusters: list[Cluster], long_tail_n: int) -> float:

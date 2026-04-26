@@ -542,6 +542,36 @@ class OpenAICompatClient:
                         text_preview = resp.text[:300]
                     except Exception:
                         pass
+                    low = text_preview.lower()
+                    # llama.cpp / vLLM / OpenAI all use slightly different
+                    # phrasings for "you sent more tokens than the
+                    # server can handle".  These are NOT transient — the
+                    # planner needs to retry with a shorter prompt, not
+                    # the same one.  Surface a distinct LLMError and
+                    # remember the new ctx ceiling so the next call
+                    # auto-routes through micro-batch.
+                    if (
+                        "context size" in low
+                        or "context_length_exceeded" in low
+                        or "maximum context" in low
+                        or "context window" in low
+                        or "too many tokens" in low
+                        or "request entity too large" in low
+                    ):
+                        observed = max(1, len(prompt) // 3)
+                        # Halve our cached ctx so the planner's
+                        # auto-microbatch picker switches to chunked
+                        # mode on the very next call.
+                        prev = self._cached_ctx or self.context_length()
+                        self._cached_ctx = max(1024, min(prev or observed, observed // 2))
+                        log.warning(
+                            "openai-compat context exceeded — "
+                            "observed prompt %d tok, dropping cached ctx to %d",
+                            observed, self._cached_ctx,
+                        )
+                        raise LLMError(
+                            f"context exceeded: {text_preview[:160]}"
+                        )
                     if resp.status_code in (429, 500, 502, 503, 504):
                         raise LLMError(
                             f"openai-compat transient http {resp.status_code}: {text_preview[:200]}"
@@ -662,6 +692,11 @@ class OpenAICompatClient:
                 )
                 # Don't keep retrying after an explicit user cancel.
                 if isinstance(exc, LLMError) and "canceled" in str(exc):
+                    raise
+                # Don't retry the same prompt that already busted the
+                # server's context limit — the caller (planner) needs
+                # to re-plan with a smaller chunk.
+                if isinstance(exc, LLMError) and "context exceeded" in str(exc):
                     raise
                 attempt += 1
                 if attempt <= self.max_retries:

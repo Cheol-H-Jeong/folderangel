@@ -858,14 +858,27 @@ class Planner:
             )
             if progress:
                 progress(f"plan: LLM 호출 중 ({len(payloads)} 파일)…", -1.0)
-            resp = self._llm_call(
-                prompt,
-                heartbeat=self._heartbeat_for(
-                    f"plan: LLM 응답 대기 중 ({len(payloads)} 파일)", progress
-                ),
-                stream_label=f"plan 토큰 수신 ({len(payloads)} 파일)",
-                progress=progress,
-            )
+            try:
+                resp = self._llm_call(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"plan: LLM 응답 대기 중 ({len(payloads)} 파일)", progress
+                    ),
+                    stream_label=f"plan 토큰 수신 ({len(payloads)} 파일)",
+                    progress=progress,
+                )
+            except LLMError as exc:
+                if "context exceeded" in str(exc):
+                    if progress:
+                        progress(
+                            "plan: 컨텍스트 초과 — micro-batch 로 자동 전환합니다.",
+                            -1.0,
+                        )
+                    log.warning(
+                        "single-call context exceeded — switching to micro-batch"
+                    )
+                    return self._microbatch_plan(payloads, progress)
+                raise
             cats = resp.get("categories") or []
             assigns = resp.get("assignments") or []
             if not cats or not isinstance(assigns, list):
