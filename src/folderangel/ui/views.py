@@ -14,6 +14,30 @@ from ..models import OperationResult
 from .widgets import Card, PathDropBar, StageIndicator, StatsRow
 
 
+def _is_live_status(text: str) -> bool:
+    """True for messages that update in place rather than spawn new rows.
+
+    Currently: streaming-token lines (``"… 토큰 수신 중 …"``) and the
+    per-second heartbeat (``"… 응답 대기 … Ns 경과"``).  These all
+    represent the same logical event and shouldn't push a new row each
+    time.  Anything else (file moves, stage transitions, warnings,
+    errors) is a real new event and gets its own row.
+    """
+    return ("토큰 수신" in text) or ("응답 대기" in text and "경과" in text)
+
+
+def _live_group(text: str) -> str:
+    """Group key for in-place-updating log lines.
+
+    Returns the leading stage prefix (e.g. ``"plan"``, ``"micro-batch
+    A [2/5]"``) so two consecutive heartbeats on the same prefix
+    overwrite each other but a transition (plan → organize, A → B)
+    appends a fresh row.
+    """
+    head = text.split(":", 1)[0].split("…", 1)[0].strip()
+    return head[:64] or "live"
+
+
 class ToastDialog(QtWidgets.QDialog):
     """Apple-style modal toast.
 
@@ -287,6 +311,7 @@ class OrganizeView(QtWidgets.QWidget):
         self.btn_cancel.setVisible(running)
         if running:
             self._frozen_after_cancel = False
+            self._live_group = None
             self.report_card.setVisible(False)
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
@@ -363,10 +388,43 @@ class OrganizeView(QtWidgets.QWidget):
         self.progress_label.setText(head)
         from datetime import datetime as _dt
 
+        # The streaming-token line and the per-second heartbeat both update
+        # the *same* visual idea (count + tail).  Don't push a new log row
+        # for each one — overwrite the previous row in place when the
+        # status belongs to the same "live" group.  A new row is appended
+        # only when the message kind changes (different stage, or a
+        # non-live event like "move [3/14] foo.pptx → …").
         ts = _dt.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{ts}] {text}")
+        formatted = f"[{ts}] {text}"
+        if _is_live_status(text):
+            self._replace_or_append_live_line(formatted, group=_live_group(text))
+        else:
+            self._live_group = None
+            self.log_view.appendPlainText(formatted)
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    def _replace_or_append_live_line(self, formatted: str, *, group: str) -> None:
+        """Update the trailing line of the log view in place when this
+        status belongs to the same live group as the previous one;
+        otherwise append a new line.  This keeps the streaming-token
+        feed on a single growing row instead of one row per second.
+        """
+        prev_group = getattr(self, "_live_group", None)
+        doc = self.log_view.document()
+        if prev_group != group or doc.blockCount() == 0:
+            self._live_group = group
+            self.log_view.appendPlainText(formatted)
+            return
+        # Replace the last block's content with the new formatted line.
+        cursor = self.log_view.textCursor()
+        cursor.movePosition(QtGui.QTextCursor.End)
+        cursor.movePosition(QtGui.QTextCursor.StartOfBlock)
+        cursor.movePosition(
+            QtGui.QTextCursor.EndOfBlock, QtGui.QTextCursor.KeepAnchor
+        )
+        cursor.removeSelectedText()
+        cursor.insertText(formatted)
 
     def on_finished(self, op: OperationResult):
         self._last_op = op
