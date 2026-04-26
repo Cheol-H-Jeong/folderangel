@@ -29,13 +29,35 @@ def _is_live_status(text: str) -> bool:
 def _live_group(text: str) -> str:
     """Group key for in-place-updating log lines.
 
-    Returns the leading stage prefix (e.g. ``"plan"``, ``"micro-batch
-    A [2/5]"``) so two consecutive heartbeats on the same prefix
-    overwrite each other but a transition (plan → organize, A → B)
-    appends a fresh row.
+    Within a single planning stage we get *both* heartbeat lines
+    (``"plan: LLM 응답 대기 중 (5 파일) … 1s 경과"``) and token-stream
+    lines (``"plan 토큰 수신 (5 파일): 96자 수신 중 — …"``).  They
+    describe the same in-flight call, so they must collapse onto the
+    same row — but the two strings have different prefixes before the
+    first colon, which used to put them in different groups.
+
+    Fix: take the *very first stage word* (until the first whitespace,
+    colon, or '…') as the key — both ``"plan: LLM 응답 대기"`` and
+    ``"plan 토큰 수신"`` map to ``"plan"`` so they overwrite each other.
+    For chunked stages we also keep an ``[idx/total]`` suffix so
+    ``"stage-a [1/5]"`` and ``"stage-a [2/5]"`` stay distinct.
     """
-    head = text.split(":", 1)[0].split("…", 1)[0].strip()
-    return head[:64] or "live"
+    import re as _re
+
+    head = text.lstrip()
+    # First whitespace-delimited stage token, lowercased.
+    m = _re.match(r"\S+", head)
+    if not m:
+        return "live"
+    base = m.group(0).rstrip(":").casefold()
+    # Optional bracketed chunk index (e.g. "[2/5]") so chunk
+    # transitions append a fresh row.
+    rest = head[m.end():].lstrip()
+    chunk = ""
+    cm = _re.match(r"\[\s*\d+\s*/\s*\d+\s*\]", rest)
+    if cm:
+        chunk = " " + cm.group(0)
+    return (base + chunk)[:64] or "live"
 
 
 class ToastDialog(QtWidgets.QDialog):
