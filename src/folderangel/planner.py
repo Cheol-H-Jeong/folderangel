@@ -77,8 +77,17 @@ def _parse_time_label_range(label: str):
 
 def _guess_by_time(entry, cats):
     """Pick the project category whose time-window covers the file's
-    modified date.  Returns the category id, or ``None`` if nothing
+    modified date *and* whose tokens overlap with the file's filename
+    or excerpt.  Returns the category id, or ``None`` if nothing
     matches (in which case the caller falls back to misc).
+
+    The token-overlap requirement is critical: without it, any file
+    whose mtime happens to fall inside a project's time window gets
+    auto-assigned to that project, even if its filename and content
+    have nothing to do with it.  That's how files like
+    ``1152.PDF`` / ``IMG_8933.jpeg`` / ``NTS_eTaxInvoice.html`` ended
+    up dumped into whatever project happened to be active at the
+    file's modified date.
 
     Only project-style categories are considered — anything tagged as
     the catch-all ``misc`` is excluded.  When several windows match,
@@ -90,6 +99,11 @@ def _guess_by_time(entry, cats):
         d = entry.modified.date()
     except Exception:
         return None
+    file_toks = _filename_tokens(getattr(entry, "name", "") or "")
+    excerpt = (getattr(entry, "content_excerpt", "") or "")[:1200]
+    if excerpt:
+        # Reuse the same tokeniser on the body so 한국어 본문도 일관되게 처리.
+        file_toks = file_toks | _filename_tokens(excerpt)
     best = None
     best_span = None
     for c in cats:
@@ -99,11 +113,23 @@ def _guess_by_time(entry, cats):
         if rng is None:
             continue
         start, end = rng
-        if start <= d <= end:
-            span = (end - start).days
-            if best is None or span < best_span:
-                best = c.id
-                best_span = span
+        if not (start <= d <= end):
+            continue
+        # Time match alone is not enough — require some textual
+        # overlap with the category so we don't pull unrelated files
+        # in just because their mtime fell inside the project window.
+        cat_toks = _category_tokens(
+            {
+                "name": getattr(c, "name", "") or "",
+                "description": getattr(c, "description", "") or "",
+            }
+        )
+        if not _tokens_overlap(file_toks, cat_toks):
+            continue
+        span = (end - start).days
+        if best is None or span < best_span:
+            best = c.id
+            best_span = span
     return best
 
 

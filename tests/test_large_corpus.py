@@ -573,6 +573,67 @@ def test_filename_pass_keyword_overlap_veto_demotes_to_deferred(tmp_path):
     )
 
 
+def test_time_guess_requires_token_overlap_with_category(tmp_path):
+    """The "시기로 추정" rescue (``_guess_by_time``) must NOT pull a
+    file into a project category just because the file's mtime fell
+    inside that category's time window.  Without an additional
+    token-overlap check the planner kept dumping unrelated files
+    (1152.PDF, IMG_8933.jpeg, NTS_eTaxInvoice.html, RTX PRO 6000 GPU
+    구매 계약.pdf) into whichever project was currently active —
+    e.g. "행안부_범정부AI공통기반_문서인식 〈2025-2026〉".
+
+    This test reproduces that exact failure: feed a planner result
+    that leaves the unrelated files unassigned, and assert that they
+    end up in misc/기타 rather than getting "시기로 추정" snapped to
+    the project category whose 2025-2026 window happens to contain
+    their mtime.
+    """
+    from datetime import datetime, timezone
+    from folderangel.models import Category
+    from folderangel.planner import _guess_by_time
+
+    project_cats = [
+        Category(
+            id="haengan-doc-recog",
+            name="행안부 범정부AI공통기반 문서인식",
+            description="범정부 AI 공통기반 문서인식 사업",
+            time_label="2025–2026",
+            duration="multi-year",
+            group=2,
+        ),
+        Category(id="misc", name="기타", description="", group=9),
+    ]
+
+    # All three files have mtime *inside* the project window (2025–2026)
+    # but no token overlap with the category — must NOT be matched.
+    in_window_ts = datetime(2025, 6, 1, tzinfo=timezone.utc).timestamp()
+    for fname in [
+        "1152.PDF",
+        "IMG_8933.jpeg",
+        "NTS_eTaxInvoice.html",
+        "RTX PRO 6000 GPU 3대 구매 계약.pdf",
+        "4aL6Fv3rfd1N2lTHeCvhROHBhuY.mp4",
+    ]:
+        e = _entry(fname, ts=in_window_ts, content="")
+        guess = _guess_by_time(e, project_cats)
+        assert guess is None, (
+            f"_guess_by_time pulled '{fname}' into '{guess}' purely on "
+            f"timestamp — should have required token overlap"
+        )
+
+    # Counter-example — a file that DOES share tokens with the category
+    # SHOULD be matched even if its mtime is inside the same window.
+    e = _entry(
+        "행안부_문서인식_사업계획서.pdf",
+        ts=in_window_ts,
+        content="문서인식 사업계획서 본문",
+    )
+    guess = _guess_by_time(e, project_cats)
+    assert guess == "haengan-doc-recog", (
+        f"file with clear keyword overlap got '{guess}' — expected match"
+    )
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to
