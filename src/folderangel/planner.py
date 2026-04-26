@@ -691,7 +691,7 @@ class Planner:
                     heartbeat=self._heartbeat_for(
                         f"micro-batch A [{idx}/{len(chunks)}] 응답 대기", progress
                     ),
-                    stream_label=f"micro-batch A [{idx}/{len(chunks)}] 토큰",
+                    stream_label=f"micro-batch A [{idx}/{len(chunks)}] 토큰 수신",
                     progress=progress,
                 )
             except LLMError:
@@ -725,7 +725,7 @@ class Planner:
         merged = self._llm_call(
             merge_prompt,
             heartbeat=self._heartbeat_for("micro-batch M 응답 대기", progress),
-            stream_label="micro-batch M 토큰",
+            stream_label="micro-batch M 토큰 수신",
             progress=progress,
         )
         categories_raw = merged.get("categories") or []
@@ -759,7 +759,7 @@ class Planner:
                     heartbeat=self._heartbeat_for(
                         f"micro-batch B [{idx}/{len(chunks)}] 응답 대기", progress
                     ),
-                    stream_label=f"micro-batch B [{idx}/{len(chunks)}] 토큰",
+                    stream_label=f"micro-batch B [{idx}/{len(chunks)}] 토큰 수신",
                     progress=progress,
                 )
                 assigns = resp.get("assignments") or []
@@ -790,7 +790,7 @@ class Planner:
             resp = self._llm_call(
                 prompt,
                 heartbeat=self._heartbeat_for("micro-batch A (분할) 응답 대기", progress),
-                stream_label="micro-batch A (분할) 토큰",
+                stream_label="micro-batch A (분할) 토큰 수신",
                 progress=progress,
             )
             cands = resp.get("candidates") or []
@@ -1255,7 +1255,7 @@ class Planner:
                     heartbeat=self._heartbeat_for(
                         f"파일명 패스 [{idx}/{len(chunks)}] 응답 대기", progress
                     ),
-                    stream_label=f"파일명 패스 [{idx}/{len(chunks)}] 토큰",
+                    stream_label=f"파일명 패스 [{idx}/{len(chunks)}] 토큰 수신",
                     progress=progress,
                 )
             except LLMError as exc:

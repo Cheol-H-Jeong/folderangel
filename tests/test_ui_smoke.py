@@ -13,6 +13,29 @@ from folderangel.config import default_paths, load_config  # noqa: E402
 from folderangel.ui.main import MainWindow  # noqa: E402
 
 
+def test_every_stream_label_in_planner_uses_live_status_phrase():
+    """Every ``stream_label=...`` literal in the planner must contain
+    "토큰 수신" so the UI's ``_is_live_status`` detector treats the
+    streamed-token lines as in-place updates rather than spawning a
+    fresh row per token tick.  Past regression: filename-first pass
+    used "토큰" without "수신" and the user saw rows pile up.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1]
+           / "src" / "folderangel" / "planner.py").read_text(encoding="utf-8")
+    import re
+    # Match either f-strings or plain strings.
+    bad: list[str] = []
+    for m in re.finditer(r'stream_label\s*=\s*([fF]?"[^"]+")', src):
+        lit = m.group(1)
+        if "토큰 수신" not in lit:
+            bad.append(lit)
+    assert not bad, (
+        "stream_label literals missing '토큰 수신' phrase — UI will spawn "
+        f"a new row per token tick: {bad}"
+    )
+
+
 def test_live_status_collapses_heartbeat_and_token_stream(tmp_path, monkeypatch):
     """Heartbeat ("…N s 경과") and token-stream ("토큰 수신") lines for
     the same planning stage must overwrite each other on the same row,
