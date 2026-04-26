@@ -816,16 +816,24 @@ class Planner:
         clusters, long_tail = cluster_files(entries, min_cluster_size=cluster_min)
 
         # 1) Build the representative bag (a stand-in mini-corpus).
+        # Long-tail entries are NOT added here on purpose — sending them
+        # into the first call dilutes the project/사업/기관 axis the LLM
+        # is supposed to learn from cleanly-clustered reps.  They are
+        # picked up by the dedicated long-tail discover call below
+        # (Step 4), which also receives the outliers we expel from
+        # clusters via the purity check.
         rep_entries: list[FileEntry] = []
         rep_to_cluster: dict[Path, Cluster] = {}
         for c in clusters:
             for r in c.representatives(reps_per):
                 rep_entries.append(r)
                 rep_to_cluster[r.path] = c
-        # Add long-tail singletons directly so they get classified too.
-        rep_entries.extend(long_tail)
+        if not rep_entries and long_tail:
+            # Degenerate corpus — every file landed in the long tail.
+            # Fall through to the long-tail discover call directly.
+            rep_entries = []
 
-        if not rep_entries:
+        if not rep_entries and not long_tail:
             # nothing to do
             return {"categories": [], "assignments": []}
 
@@ -847,22 +855,25 @@ class Planner:
             )
             rep_payloads.append(d)
 
-        if progress:
-            progress(
-                f"plan: 대표 {len(rep_entries)}개로 단일 호출 시도 "
-                f"(원본 {len(entries)}개)",
-                0.25,
-            )
-        try:
-            llm_out = self._single_call_plan(rep_payloads, progress)
-        except Exception as exc:
-            log.warning("hierarchical: single-call on reps failed (%s) — micro-batch", exc)
+        categories_raw: list[dict] = []
+        rep_assignments: list[dict] = []
+        if rep_payloads:
             if progress:
-                progress("plan: 대표 micro-batch fallback", 0.5)
-            llm_out = self._microbatch_plan(rep_payloads, progress)
+                progress(
+                    f"plan: 대표 {len(rep_entries)}개로 단일 호출 시도 "
+                    f"(원본 {len(entries)}개, 롱테일 {len(long_tail)}개는 추가 호출에서)",
+                    0.25,
+                )
+            try:
+                llm_out = self._single_call_plan(rep_payloads, progress)
+            except Exception as exc:
+                log.warning("hierarchical: single-call on reps failed (%s) — micro-batch", exc)
+                if progress:
+                    progress("plan: 대표 micro-batch fallback", 0.5)
+                llm_out = self._microbatch_plan(rep_payloads, progress)
 
-        categories_raw: list[dict] = list(llm_out.get("categories") or [])
-        rep_assignments: list[dict] = list(llm_out.get("assignments") or [])
+            categories_raw = list(llm_out.get("categories") or [])
+            rep_assignments = list(llm_out.get("assignments") or [])
 
         # 3) Build a quick lookup from rep path → assignment so we can
         #    propagate to every cluster member.
@@ -920,25 +931,24 @@ class Planner:
                               else f"동일 패턴 클러스터 자동 상속 — {reason}",
                 })
 
-        # Long-tail rep assignments come straight through.
-        for e in long_tail:
-            a = assign_by_rep_path.get(str(e.path)) or assign_by_basename.get(e.name)
-            if a is not None:
-                all_assignments.append(a)
-
-        # Outliers: re-classify with a small extra LLM call so they
-        # don't get stuck in the wrong cluster's category.  If even
-        # that fails or no LLM is available, _plan_from_dict's
-        # time-based rescue kicks in via the misc fallback.
-        if outliers:
+        # Long-tail discover+assign: the original long-tail (files that
+        # never made it into a signature/embedding cluster) plus the
+        # outliers we just expelled from impure clusters go to a single
+        # dedicated LLM call that may EITHER reuse an existing category
+        # OR propose a *new* one (사업/과제/프로젝트/기관/목적/용도
+        # axis).  This is the user-facing "관련이 없으면 롱테일로 넘기고
+        # LLM이 추가 카테고리 생성" behaviour.
+        longtail_bag: list[FileEntry] = list(long_tail) + list(outliers)
+        if longtail_bag:
             if progress:
                 progress(
-                    f"plan: outlier {len(outliers)}개 추가 분류 — 클러스터 본문과 다른 멤버",
+                    f"plan: 롱테일 {len(longtail_bag)}개 추가 분류 "
+                    f"(원본 {len(long_tail)} + 클러스터 outlier {len(outliers)})",
                     0.88,
                 )
             try:
-                payloads_out: list[dict] = []
-                for e in outliers:
+                payloads_lt: list[dict] = []
+                for e in longtail_bag:
                     d = e.to_summary_dict()
                     d["excerpt"] = (d.get("excerpt") or "")[:per_file_cap]
                     d["path"] = _safe_path_repr(
@@ -946,20 +956,38 @@ class Planner:
                         _looks_like_mojibake,
                         anonymise_parents=anonymise,
                     )
-                    payloads_out.append(d)
-                extra = self._stage_b_call(payloads_out, categories_raw, progress)
-                for a in extra:
+                    payloads_lt.append(d)
+                lt_out = self._longtail_discover_call(
+                    payloads_lt, categories_raw, progress
+                )
+                # Merge any newly-proposed categories, capped at
+                # max_categories.  Existing ids win — never replace.
+                existing_ids = {c.get("id") for c in categories_raw}
+                cap = int(self.config.max_categories)
+                for nc in lt_out.get("new_categories") or []:
+                    nid = (nc.get("id") or "").strip()
+                    if not nid or nid in existing_ids:
+                        continue
+                    if len(categories_raw) >= cap:
+                        break
+                    categories_raw.append(nc)
+                    existing_ids.add(nid)
+                for a in lt_out.get("assignments") or []:
                     a.setdefault("reason", "")
-                    a["reason"] = (a.get("reason") or "") + " · outlier 재분류"
+                    a["reason"] = (a.get("reason") or "") + " · 롱테일 재분류"
                     all_assignments.append(a)
             except Exception as exc:
-                log.warning("outlier re-classify failed (%s) — leaving to misc fallback", exc)
-                # leave the outliers to be picked up by _plan_from_dict's
+                log.warning(
+                    "long-tail discover failed (%s) — leaving to misc fallback", exc
+                )
+                # leave the long-tail to be picked up by _plan_from_dict's
                 # time-based / misc rescue.
 
         if progress:
+            propagated = len(entries) - len(outliers) - len(long_tail)
             progress(
-                f"plan: 클러스터 {len(clusters)} → 대표 분류 → 멤버 {len(entries) - len(outliers)}명 자동 상속, outlier {len(outliers)}명 개별 분류",
+                f"plan: 클러스터 {len(clusters)} → 대표 분류 → 멤버 {propagated}명 자동 상속, "
+                f"롱테일/outlier {len(longtail_bag)}명 추가 호출",
                 0.92,
             )
         return {"categories": categories_raw, "assignments": all_assignments}
@@ -1091,6 +1119,71 @@ class Planner:
                         a["primary"] = _closest_category(a["primary"], categories)
                 assignments_raw.extend(m["assignments"])
         return {"categories": categories, "assignments": assignments_raw}
+
+    # ------------------------------------------------------------------
+    def _longtail_discover_call(
+        self,
+        files: list[dict],
+        categories_payload: list[dict],
+        progress: Optional[ProgressCB] = None,
+    ) -> dict:
+        """Discover-or-assign call for the long-tail bag.
+
+        The LLM gets the *existing* categories AND files that didn't
+        fit any of them.  For each file it may either pick an existing
+        category id or propose a brand-new one (사업/과제/프로젝트/
+        기관/목적/용도 axis).  Returns ``{"new_categories": [...],
+        "assignments": [...]}`` — the caller merges new categories
+        into the running list (capped by max_categories) and appends
+        the assignments.
+
+        On JSON / network failure we halve the batch and retry, same
+        recovery shape as ``_stage_b_call``.
+        """
+        if not files:
+            return {"new_categories": [], "assignments": []}
+        prompt = prompts.build_longtail_discover(
+            files,
+            categories_payload,
+            self.config.ambiguity_threshold,
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+        )
+        try:
+            resp = self._llm_call(
+                prompt,
+                heartbeat=self._heartbeat_for(
+                    f"long-tail: LLM 응답 대기 ({len(files)} 파일)", progress
+                ),
+                stream_label=f"long-tail 토큰 수신 ({len(files)} 파일)",
+                progress=progress,
+            )
+        except LLMError as exc:
+            if len(files) <= 1:
+                raise
+            log.warning(
+                "long-tail split (%d → %d+%d) after error: %s",
+                len(files), len(files) // 2, len(files) - len(files) // 2, exc,
+            )
+            mid = len(files) // 2
+            left = self._longtail_discover_call(
+                files[:mid], categories_payload, progress
+            )
+            right = self._longtail_discover_call(
+                files[mid:], categories_payload, progress
+            )
+            return {
+                "new_categories": list(left.get("new_categories") or [])
+                + list(right.get("new_categories") or []),
+                "assignments": list(left.get("assignments") or [])
+                + list(right.get("assignments") or []),
+            }
+        new_cats = resp.get("new_categories") or []
+        assigns = resp.get("assignments") or []
+        if not isinstance(new_cats, list):
+            new_cats = []
+        if not isinstance(assigns, list):
+            raise LLMError("long-tail assignments not a list")
+        return {"new_categories": new_cats, "assignments": assigns}
 
     # ------------------------------------------------------------------
     def _stage_b_call(

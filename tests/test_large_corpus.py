@@ -282,6 +282,83 @@ def test_outlier_demoted_to_individual_classification(tmp_path):
     )
 
 
+def test_longtail_discover_creates_new_category_for_unrelated_file(tmp_path):
+    """A file that doesn't fit any cluster (long-tail) must reach the
+    LLM via the discover-or-assign call, and a *new* category proposed
+    there must be merged into the final plan.  This guards the user
+    flow: '관련이 없으면 롱테일로 넘겨서 LLM이 추가 카테고리 생성'."""
+    cfg = Config()
+    # Force the hierarchical tier on a tiny synthetic corpus so we can
+    # exercise the rep-call → long-tail-discover handoff deterministically.
+    cfg.small_corpus_files = 3
+    cfg.hierarchical_min_files = 4
+    cfg.cluster_min_size = 2
+    cfg.reps_per_cluster = 2
+    cfg.outlier_min_similarity = 0.45
+
+    class _Fake:
+        def __init__(self):
+            self.calls = 0
+
+        def generate_json(self, prompt, **_kw):
+            self.calls += 1
+            if self.calls == 1:
+                # First call: only the cluster reps reach the LLM
+                # (long-tail is held back for the second call).
+                return {
+                    "categories": [{"id": "proj", "name": "ProjectX",
+                                    "group": 1, "duration": "annual"}],
+                    "assignments": [
+                        {"path": "/work/proj_v1.pdf", "primary": "proj",
+                         "primary_score": 0.9, "secondary": [],
+                         "reason": "rep"},
+                        {"path": "/work/proj_v2.pdf", "primary": "proj",
+                         "primary_score": 0.9, "secondary": [],
+                         "reason": "rep"},
+                    ],
+                }
+            # Second call: long-tail discover.  LLM proposes a NEW
+            # category 'insurance-policy' for the 약관 file.
+            return {
+                "new_categories": [
+                    {"id": "insurance-policy", "name": "원더풀S 통합보험 약관",
+                     "group": 2, "duration": "mixed"},
+                ],
+                "assignments": [
+                    {"path": "/work/insurance_terms.pdf",
+                     "primary": "insurance-policy",
+                     "primary_score": 0.85, "secondary": [],
+                     "reason": "약관 전용 폴더 신설"},
+                ],
+            }
+
+    fake = _Fake()
+    p = Planner(cfg, gemini=fake)
+    entries = [
+        _entry("proj_v1.pdf", ts=1700000000.0, content="ProjectX summary v1"),
+        _entry("proj_v2.pdf", ts=1700000050.0, content="ProjectX summary v2"),
+        _entry("proj_v3.pdf", ts=1700000100.0, content="ProjectX summary v3"),
+        # Long-tail singleton — completely different domain (insurance).
+        _entry("insurance_terms.pdf", ts=1700000150.0,
+               content="무배당 원더풀S 통합보험 약관 보험금 청구 면책"),
+    ]
+    plan = p.plan(entries)
+
+    cat_ids = {c.id for c in plan.categories}
+    assert "insurance-policy" in cat_ids, (
+        f"new category from long-tail discover not merged: {cat_ids}"
+    )
+    insurance_assigns = [
+        a for a in plan.assignments if a.file_path.name == "insurance_terms.pdf"
+    ]
+    assert insurance_assigns, "insurance file missing from plan"
+    assert insurance_assigns[0].primary_category_id == "insurance-policy", (
+        "insurance file did not land in the new category"
+    )
+    # Exactly two LLM calls — reps + long-tail.  No silent fallback.
+    assert fake.calls == 2, f"unexpected LLM call count: {fake.calls}"
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to

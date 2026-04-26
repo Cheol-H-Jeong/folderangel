@@ -179,9 +179,12 @@ class Config:
     reps_per_cluster: int = 2           # representatives sampled per cluster
     # When the rep's body and a cluster member's body fall below this
     # cosine similarity, the member is *not* propagated to the rep's
-    # category — it gets re-classified by the LLM individually.
-    # 0 disables the outlier check entirely.
-    outlier_min_similarity: float = 0.30
+    # category — instead it is *expelled to the long-tail* and gets
+    # categorised in a separate LLM call that can also propose NEW
+    # categories.  Tighter than the old loose 0.30 because at 0.30 a
+    # 약관/보험 file passes against a 범정부/사업 representative just
+    # because they share clerical Korean nouns.  0 disables the check.
+    outlier_min_similarity: float = 0.45
 
     # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
     # Phi-4-mini-reasoning style models.

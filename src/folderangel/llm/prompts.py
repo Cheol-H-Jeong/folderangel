@@ -144,6 +144,46 @@ SINGLE_CALL_INSTRUCTION = """아래 전체 파일 목록을 보고, **한 번의
 """
 
 
+LONGTAIL_DISCOVER_INSTR = """이 파일들은 1차 클러스터링에서 어느 사업/과제/프로젝트/기관/목적/용도에도
+정합하지 못해 **롱테일**로 분리된 파일들이다. 위 'categories'는 1차에서 이미 합의된 폴더 목록이고,
+아래 'files' 는 거기에 어울리지 않거나 본문 유사도가 낮아 빠진 파일들이다.
+
+각 파일에 대해 둘 중 하나만 선택하라:
+  (a) 'categories' 중 정말 어울리는 것이 있다 → primary 에 그 id 를 넣는다.
+  (b) 어울리는 것이 없다 → 새 카테고리를 *너가 직접 제안*하고 거기에 넣는다.
+      새 카테고리는 응답의 'new_categories' 배열에 추가하고, primary 에 그 id 를 쓴다.
+      새 카테고리 또한 사업/과제/프로젝트/기관/목적/용도 단위로 만들고, 추상적 라벨
+      ("문서", "보고서", "기타")은 금지. 같은 새 id 를 여러 파일이 공유해도 좋다.
+
+응답 JSON 스키마(엄격):
+{{
+  "new_categories": [
+    {{ "id": "slug","name": "구체 폴더명","description": "한 줄","time_label": "","duration": "mixed","group": 1 }}
+  ],
+  "assignments": [
+    {{ "path": "원본 path", "primary": "category_id",
+       "primary_score": 0.0,
+       "secondary": [ {{ "id": "category_id", "score": 0.0 }} ],
+       "reason": "한 줄 사유" }}
+  ]
+}}
+임계값({ambiguity_threshold}) 이하로 차이나는 다른 카테고리만 secondary 에 추가."""
+
+
+def build_longtail_discover(
+    files: list[dict],
+    categories: list[dict],
+    ambiguity_threshold: float,
+    *,
+    reclassify_mode: bool = False,
+) -> str:
+    body = json.dumps(
+        {"categories": categories, "files": files}, ensure_ascii=False, indent=2
+    )
+    instr = LONGTAIL_DISCOVER_INSTR.format(ambiguity_threshold=ambiguity_threshold)
+    return f"{STAGE_A_SYSTEM}{_maybe_hint(reclassify_mode)}\n\n{instr}\n\n데이터:\n{body}"
+
+
 RECLASSIFY_HINT = (
     "사용자가 명시적으로 *재분류*를 요청했다. "
     "각 파일 path 의 부모 폴더 컴포넌트는 의도적으로 `[folder]` 자리표시자로 가려 두었다. "
