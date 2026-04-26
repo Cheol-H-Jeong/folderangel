@@ -1,30 +1,43 @@
-# Build a single-file Windows executable with PyInstaller.
+# Build a Windows one-folder bundle (and optionally an Inno Setup installer).
 #
-# Run from the repo root:
-#   .\scripts\build_windows.ps1
-# Requires the `dev` extra to be installed in the active venv:
+# Usage (PowerShell, repo root, with an activated venv that has dev + windows extras):
 #   pip install -e ".[dev,windows]"
-param()
-
+#   .\scripts\build_windows.ps1                # bundle only
+#   .\scripts\build_windows.ps1 -Installer     # bundle + .exe installer (requires Inno Setup 6 'iscc')
+#
+# Code signing / SmartScreen reputation is OUT OF SCOPE.  The unsigned
+# bundle still runs locally; SmartScreen may warn on first run.
+param(
+    [switch]$Installer
+)
 $ErrorActionPreference = "Stop"
-
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if (-not (Get-Command pyinstaller -ErrorAction SilentlyContinue)) {
-    Write-Error "pyinstaller not found. Run: pip install -e `".[dev,windows]`""
+    Write-Error 'pyinstaller not found — run: pip install -e ".[dev,windows]"'
 }
 
-Remove-Item -Recurse -Force build, dist, folderangel.spec -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
-pyinstaller `
-    --noconfirm `
-    --name FolderAngel `
-    --windowed `
-    --onefile `
-    --paths "$root\src" `
-    --collect-submodules folderangel `
-    --collect-submodules PySide6 `
-    "$root\src\folderangel\__main__.py"
+pyinstaller --noconfirm "scripts\folderangel.spec"
 
-Write-Host "Built: $root\dist\FolderAngel.exe"
+$bundle = "$root\dist\folderangel"
+if (-not (Test-Path $bundle)) {
+    Write-Error "Build did not produce $bundle"
+}
+Write-Host ""
+Write-Host "Built bundle: $bundle"
+Write-Host "Run:          $bundle\folderangel.exe"
+
+if ($Installer) {
+    $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+    if (-not $iscc) {
+        Write-Warning "Inno Setup 'iscc' not on PATH — skipping installer step."
+        Write-Warning "Install from https://jrsoftware.org/isdl.php and re-run."
+        exit 0
+    }
+    iscc "$root\scripts\folderangel.iss"
+    Write-Host ""
+    Write-Host "Installer: $root\dist\FolderAngel-Setup.exe"
+}

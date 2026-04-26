@@ -66,13 +66,39 @@ def provider_label(cfg: "Config") -> str:
 def default_paths() -> AppPaths:
     """Pick a platform-appropriate data dir.
 
-    Linux/macOS: ~/.folderangel
-    Windows:     %APPDATA%/FolderAngel (falls back to home if APPDATA missing)
+      Linux:    ``$XDG_DATA_HOME/folderangel`` if set, else
+                ``~/.local/share/folderangel`` if it already exists,
+                else legacy ``~/.folderangel``.
+      macOS:    ``~/Library/Application Support/FolderAngel``
+                (legacy ``~/.folderangel`` is read transparently if the
+                user was running an older build).
+      Windows:  ``%LOCALAPPDATA%/FolderAngel`` (then ``%APPDATA%``,
+                then home).
+
+    Override with ``FOLDERANGEL_HOME`` for tests / portable installs.
     """
-    if sys.platform.startswith("win"):
-        base = Path(os.environ.get("APPDATA") or Path.home()) / "FolderAngel"
+    override = os.environ.get("FOLDERANGEL_HOME")
+    if override:
+        base = Path(override).expanduser()
+    elif sys.platform.startswith("win"):
+        base = Path(
+            os.environ.get("LOCALAPPDATA")
+            or os.environ.get("APPDATA")
+            or Path.home()
+        ) / "FolderAngel"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "FolderAngel"
+        legacy = Path.home() / ".folderangel"
+        if legacy.exists() and not base.exists():
+            base = legacy   # respect existing data from older versions
     else:
-        base = Path.home() / ".folderangel"
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            base = Path(xdg) / "folderangel"
+        else:
+            modern = Path.home() / ".local" / "share" / "folderangel"
+            legacy = Path.home() / ".folderangel"
+            base = modern if modern.exists() or not legacy.exists() else legacy
     return AppPaths(
         root=base,
         config=base / "config.json",

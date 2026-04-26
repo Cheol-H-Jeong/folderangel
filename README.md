@@ -1,96 +1,192 @@
 # FolderAngel
 
-LLM-powered folder auto-organizer for Linux and Windows.
+LLM-powered folder auto-organizer for **Linux · macOS · Windows**.
 
-FolderAngel scans a folder you point it at, reads file names, metadata and
-the first page of document bodies (PDF/DOCX/PPTX/HWP/HWPX/TXT/…), then asks
-Google Gemini to design a set of human-friendly Korean/English folders and
-file-by-file assignments.  Files with ambiguous placement are moved into the
-best-fit folder and shortcuts (symlink on Linux, `.lnk` on Windows) are left
-in the runners-up.  Every run is recorded in a local SQLite index so you can
-find moved files later by name or reason.
+FolderAngel scans a folder you point it at, reads file names + metadata
++ the first page of document bodies (PDF/DOCX/PPTX/HWP/HWPX/XLSX/TXT/…),
+asks an LLM to design human-friendly folders grouped by **project /
+business / period**, then moves each file into the right folder.
+Ambiguous files get a hardlink in their secondary folder so you can
+find them either way.  Every run is recorded in a local SQLite +
+FTS5 index so you can search any past file by name, content, or
+project.
 
-- LLM is used **only** for naming folders and planning assignments.  All file
-  IO stays on your machine.
-- **Mock planner** kicks in when you don't have an API key, so the app is
-  usable offline with sensible heuristics.
-- **Rollback** any past run from the History tab (or via `IndexDB.rollback`).
+- **Pluggable LLM**: Google Gemini *or* any OpenAI-compatible endpoint
+  (OpenAI · OpenRouter · Together · Groq · Anthropic-via-gateway ·
+  Ollama · vLLM · LM Studio · llama.cpp's HTTP server).  You only fill
+  in API URL + API key; the model list is auto-discovered.
+- **Period-aware folders**: each category gets a duration tag —
+  `burst` (1 month) / `short` (Q1) / `annual` / `multi-year` —
+  reflected in folder names.  E.g. `1. 범정부 초거대 AI 공통기반
+  〈2023–2025〉` for a multi-year programme.
+- **Cross-platform shortcuts**: hardlink on Linux, symlink on macOS,
+  `.lnk` on Windows.  Double-click opens the file.
+- **Privacy by default**: only filenames, dates, and ≤ 1,800 chars of
+  body are sent to the LLM.  Logs auto-redact API keys.
+- **Search**: Korean / English search across filename, folder name,
+  category, reason, original path, and parsed body.  Live-as-you-type.
+
+---
 
 ## Install
+
+### Pre-built packages (recommended)
+
+Grab a release for your OS from the [Releases](https://github.com/Cheol-H-Jeong/folderangel/releases)
+page.  CI builds them on every tag (Linux bundle / macOS .app / Windows
+one-folder bundle):
+
+- **Linux** — `folderangel-linux-…` archive, extract anywhere, run
+  `./folderangel/folderangel`.  An AppImage build is also produced when
+  `appimagetool` is on the build host.
+- **macOS** — open the `.app`.  First launch: right-click → Open
+  (Gatekeeper warning; signing/notarisation is pending).
+- **Windows** — extract the bundle and run `folderangel.exe`, or use
+  the Inno-Setup `FolderAngel-Setup.exe` if available.  SmartScreen
+  may warn on first launch (unsigned).
+
+### From source (any OS, Python ≥ 3.11)
 
 ```bash
 git clone https://github.com/Cheol-H-Jeong/folderangel.git
 cd folderangel
 
 python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -e .
+# Linux/macOS:
+source .venv/bin/activate
+# Windows PowerShell:
+# .venv\Scripts\Activate.ps1
+
+pip install -e ".[dev]"          # add ',windows' on Windows for pywin32
+folderangel                       # launches the GUI
 ```
 
-Python 3.11+ is required.  On Windows, `pip install -e ".[windows]"` pulls in
-`pywin32` so that real Windows shell shortcuts are produced.
+---
 
-## Run
+## First run
+
+1. Open the **Settings** tab.
+2. Fill in **API 엔드포인트** and **API 키**:
+   - Gemini: `https://generativelanguage.googleapis.com/v1beta` + your AI Studio key.
+   - OpenAI:  `https://api.openai.com/v1` + `sk-…`.
+   - Local Ollama / vLLM / llama.cpp: `http://localhost:11434/v1` (or 8080/v1 etc.) + the key your server expects (often empty).
+3. The model list auto-fills from the endpoint.  Single-model servers lock the field; multi-model providers show a drop-down.
+4. Click **설정 저장**.  The status line under the connection card turns green ("● 연결 준비 — …").
+5. Switch to **Organize**, drag a folder in (or click **폴더 선택…**), choose Dry-Run if you want to preview, click **정리 시작**.
+
+You can also leave the API key blank — FolderAngel falls back to a
+deterministic heuristic ("Mock 모드") so the rest of the app stays
+usable offline.
+
+---
+
+## Search
+
+Switch to the **Search** tab.  Typing queries the local index live —
+filename, folder, category, reason, original path, parsed body
+content all included.  Double-click a row to open the file's current
+location.
+
+If the index is empty (you haven't organised yet, or organised a
+folder a previous run didn't record), click **폴더 다시 인덱싱…** and
+pick the folder — its files become searchable in seconds without
+any LLM call.
+
+---
+
+## CLI
+
+```
+folderangel --cli --path ~/Downloads --recursive --dry-run
+folderangel --cli --path /work/docs --provider openai_compat \
+            --base-url http://localhost:11434/v1 --model qwen2.5 \
+            --reasoning off
+```
+
+Flags: `--path PATH` `--recursive` `--dry-run` `--mock`
+`--no-economy` `--provider {gemini,openai_compat}` `--base-url URL`
+`--model NAME` `--reasoning {off,on,auto}` `--quiet`.
+
+---
+
+## Where data lives
+
+| OS | Data dir |
+| --- | --- |
+| Linux   | `$XDG_DATA_HOME/folderangel` or `~/.local/share/folderangel` (legacy: `~/.folderangel`) |
+| macOS   | `~/Library/Application Support/FolderAngel` |
+| Windows | `%LOCALAPPDATA%\FolderAngel` |
+
+Override with `FOLDERANGEL_HOME=/path/to/dir` for portable installs / tests.
+
+The directory holds:
+- `config.json` — non-secret settings.
+- `index.db`    — SQLite + FTS5 search index.
+- `logs/`       — per-run timestamped logs (DEBUG+INFO + tracebacks).
+   API keys and Bearer tokens are redacted at the formatter; logs are
+   never committed.
+
+API keys go to the OS keyring (libsecret on Linux / Keychain on macOS
+/ Credential Manager on Windows).  If keyring is unavailable, they
+fall back to `config.json` with a clear warning.
+
+---
+
+## Build packages
 
 ```bash
-folderangel                       # launches the GUI
-folderangel --cli --path ~/Downloads --recursive --dry-run
+# Linux (one-folder bundle in dist/folderangel/)
+bash scripts/build_linux.sh
+bash scripts/build_linux.sh appimage   # also build AppImage if appimagetool is installed
+
+# macOS (.app in dist/FolderAngel.app/)
+bash scripts/build_macos.sh
+bash scripts/build_macos.sh dmg        # also build a .dmg via create-dmg
+
+# Windows (one-folder bundle in dist\folderangel\)
+.\scripts\build_windows.ps1
+.\scripts\build_windows.ps1 -Installer # also build Inno Setup .exe
 ```
 
-Put your Gemini API key in the **Settings** tab (stored in OS keyring if
-available, otherwise in `~/.folderangel/config.json`).  Alternatively export
-`GEMINI_API_KEY` (or `GOOGLE_API_KEY`) before launch.
+Requires `pip install -e ".[dev]"` (Windows: add `,windows`).
+PyInstaller spec is shared across all three OSes
+(`scripts/folderangel.spec`).
 
-Without a key FolderAngel still works — it just falls back to a deterministic
-heuristic planner (extension + filename keyword) so you can preview the flow.
+---
 
-## Features
+## Cross-platform notes
 
-- Scan with optional recursion; safe patterns skip hidden/system files and
-  never follow symlinks.
-- Extracts the first ~1,800 characters of body text from PDF, DOCX, PPTX,
-  XLSX, ODT, RTF, HWP, HWPX, HTML, and plain-text files.
-- Two-stage planner (per-batch candidates → merge → per-batch assignment) so
-  thousands of files still fit LLM context limits.
-- Dry-run mode that shows the plan without touching files.
-- Markdown report written to the target folder on every run.
-- SQLite FTS5 index (+ LIKE fallback) for fast search by filename, folder,
-  category, or original path.
-- Rollback restores files to their original paths and removes now-empty
-  category folders.
+- **Long paths on Windows**: works out of the box on Win 10 1607+ when
+  `LongPathsEnabled` is on.  Otherwise paths > 260 chars may fail —
+  enable via `gpedit.msc` → Computer Configuration → Administrative
+  Templates → System → Filesystem → "Enable Win32 long paths".
+- **macOS Gatekeeper**: the unsigned `.app` requires a right-click →
+  Open the first time.  Notarised builds will land once a
+  developer-id signing profile is attached.
+- **Linux .desktop trust**: secondary-folder shortcuts use **hardlinks**
+  by default — no Gatekeeper / "Allow Launching" toggle needed.
+- **Korean filenames**: tested on NTFS, APFS, ext4 / Btrfs.  All
+  filename + folder operations go through NFC normalisation.
 
-## CLI options
-
-```
-usage: folderangel [-h] [--cli] [--path PATH] [--recursive] [--dry-run] [--mock] [--quiet]
-
-  --cli         run headless without launching the UI
-  --path PATH   target folder
-  --recursive   include subfolders
-  --dry-run     plan only, do not move files
-  --mock        force mock planner (skip Gemini even if key is set)
-  --quiet       suppress progress output
-```
+---
 
 ## Project layout
 
 ```
-docs/SPEC.md      — full functional & UI specification
-docs/MODULES.md   — per-module contracts
-src/folderangel/  — Python package
-tests/            — pytest suite (unit + pipeline smoke)
-scripts/          — cross-platform PyInstaller build scripts
+docs/SPEC.md          full functional & UI specification
+docs/MODULES.md       per-module contracts
+docs/SELF_REVIEW.md   shared QA checklist (read before commits)
+src/folderangel/      Python package
+  ui/                 PySide6 views + worker
+  parsers/            PDF / DOCX / PPTX / XLSX / HWP / legacy Office
+  llm/                Gemini + OpenAI-compat clients
+  …
+tests/                pytest suite (60+ cases incl. cross-platform)
+scripts/              PyInstaller spec + per-OS build scripts
+.github/workflows/    CI matrix (Linux/macOS/Windows × py3.11/3.12)
 ```
 
-## Build standalone binaries
-
-```bash
-bash scripts/build_linux.sh
-powershell scripts\build_windows.ps1
-```
-
-Each script produces a single-file executable in `dist/`.  PyInstaller ≥ 6.5
-is required (installed via the `dev` extra).
+---
 
 ## License
 

@@ -1,14 +1,19 @@
 """Extension → parser dispatcher. Never raises; returns '' on failure."""
 from __future__ import annotations
 
+import concurrent.futures as _futures
 import logging
-import signal
-import threading
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger(__name__)
+
+# Single shared worker pool so we don't spawn one thread per file just
+# to enforce a timeout.  Cross-platform: works identically on Linux,
+# macOS, and Windows (no SIGALRM dependency).
+_PARSE_POOL = _futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="folderangel-parse"
+)
 
 SUPPORTED_EXTENSIONS: set[str] = {
     ".pdf",
@@ -43,48 +48,26 @@ SUPPORTED_EXTENSIONS: set[str] = {
 }
 
 
-@contextmanager
-def _time_limit(seconds: float):
-    """Cross-platform-ish soft timeout for parsers.
-
-    Uses SIGALRM on POSIX main thread; otherwise falls back to a watchdog
-    thread that sets a flag (parsers poll via callbacks that accept a budget).
-    For the simple short files we target, this is adequate.
-    """
-    # SIGALRM is only available on POSIX main thread; we skip on Windows or non-main threads.
-    import sys
-
-    use_alarm = (
-        hasattr(signal, "SIGALRM")
-        and not sys.platform.startswith("win")
-        and threading.current_thread() is threading.main_thread()
-    )
-
-    if not use_alarm:
-        yield
-        return
-
-    def _raise(signum, frame):
-        raise TimeoutError("parser timeout")
-
-    old = signal.signal(signal.SIGALRM, _raise)
-    signal.setitimer(signal.ITIMER_REAL, max(0.05, float(seconds)))
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old)
-
-
 def _safe(parser: Callable[[Path, int], str], path: Path, max_chars: int, timeout: float) -> str:
+    """Run *parser* with a hard wall-clock timeout, returning ``""`` on
+    failure.  Cross-platform: uses a thread-pool ``Future`` so it works
+    on Linux, macOS, and Windows alike, including from non-main threads.
+
+    The parser thread may keep running after the timeout (Python has no
+    safe way to kill it), but the caller is unblocked immediately.
+    """
     try:
-        with _time_limit(timeout):
-            return (parser(path, max_chars) or "").strip()[:max_chars]
-    except TimeoutError:
-        log.warning("parser timeout: %s", path)
+        future = _PARSE_POOL.submit(parser, path, max_chars)
+        try:
+            text = future.result(timeout=max(0.1, float(timeout)))
+        except _futures.TimeoutError:
+            future.cancel()
+            log.warning("parser timeout (%.1fs): %s", timeout, path)
+            return ""
     except Exception as exc:  # pragma: no cover — parser-specific
         log.warning("parser failed for %s: %s", path, exc)
-    return ""
+        return ""
+    return (text or "").strip()[:max_chars]
 
 
 def extract_excerpt(path: Path, max_chars: int = 1800, timeout: float = 5.0) -> str:

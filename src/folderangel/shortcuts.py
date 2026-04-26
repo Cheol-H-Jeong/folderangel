@@ -167,8 +167,13 @@ def _write_desktop_link(path: Path, target: Path) -> None:
     File managers treat this as a link to a URI; double-click opens the
     underlying file with its default handler — same as opening the
     original file from its real location.
+
+    Korean / unicode / spaces in the path are properly percent-escaped
+    using ``urllib.parse.quote`` so file managers don't choke on them.
     """
-    target_uri = "file://" + str(target).replace("'", "\\'")
+    from urllib.parse import quote
+
+    target_uri = "file://" + quote(str(target), safe="/:")
     contents = (
         "[Desktop Entry]\n"
         "Version=1.0\n"

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 LIGHT_QSS = """
 * {
-    font-family: -apple-system, "SF Pro Text", "Pretendard", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Segoe UI", sans-serif;
+    font-family: -apple-system, "SF Pro Text", "Pretendard", "Apple SD Gothic Neo",
+                 "Segoe UI", "Yu Gothic UI", "Malgun Gothic",
+                 "Noto Sans CJK KR", "Noto Sans KR", sans-serif;
     color: #1d1d1f;
 }
 
@@ -164,7 +166,9 @@ QTextEdit {
 
 DARK_QSS = """
 * {
-    font-family: -apple-system, "SF Pro Text", "Pretendard", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Segoe UI", sans-serif;
+    font-family: -apple-system, "SF Pro Text", "Pretendard", "Apple SD Gothic Neo",
+                 "Segoe UI", "Yu Gothic UI", "Malgun Gothic",
+                 "Noto Sans CJK KR", "Noto Sans KR", sans-serif;
     color: #f2f2f7;
 }
 

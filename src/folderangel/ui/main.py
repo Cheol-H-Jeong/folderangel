@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -239,9 +240,16 @@ def launch(argv: list[str] | None = None) -> int:
     QtWidgets.QApplication.setHighDpiScaleFactorRoundingPolicy(
         QtCore.Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
+    # macOS / Windows: ensure crisp icons + native title-bar window
+    # appearance.  No-op on Linux.
+    if sys.platform == "darwin":
+        # Use macOS unified title bar tone
+        os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
     app = QtWidgets.QApplication(argv)
     app.setApplicationName("FolderAngel")
+    app.setApplicationDisplayName("FolderAngel")
     app.setOrganizationName("FolderAngel")
+    app.setOrganizationDomain("folderangel.app")
 
     paths = default_paths()
     config = load_config(paths)

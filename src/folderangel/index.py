@@ -105,8 +105,20 @@ class IndexDB:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db_path)
+        # ``check_same_thread=False`` lets the worker thread share the
+        # connection.  ``timeout=10`` prevents Windows file-lock errors
+        # when another short-lived connection (e.g. the search view)
+        # touches the DB simultaneously.  WAL mode plays nicer with
+        # NTFS / APFS than the default rollback journal.
+        self.conn = sqlite3.connect(
+            self.db_path, check_same_thread=False, timeout=10.0
+        )
         self.conn.row_factory = sqlite3.Row
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError:
+            pass
         self.conn.executescript(_SCHEMA)
         self._migrate()
         self.conn.commit()
