@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import lru_cache as _lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -77,17 +78,20 @@ def _parse_time_label_range(label: str):
 
 def _guess_by_time(entry, cats):
     """Pick the project category whose time-window covers the file's
-    modified date *and* whose tokens overlap with the file's filename
-    or excerpt.  Returns the category id, or ``None`` if nothing
-    matches (in which case the caller falls back to misc).
+    modified date *and* whose **proper-noun set** overlaps the file's
+    filename + excerpt proper-noun set.  Returns the category id, or
+    ``None`` if nothing matches (the caller falls back to misc).
 
-    The token-overlap requirement is critical: without it, any file
-    whose mtime happens to fall inside a project's time window gets
-    auto-assigned to that project, even if its filename and content
-    have nothing to do with it.  That's how files like
-    ``1152.PDF`` / ``IMG_8933.jpeg`` / ``NTS_eTaxInvoice.html`` ended
-    up dumped into whatever project happened to be active at the
-    file's modified date.
+    The proper-noun requirement is critical for correctness: a
+    bag-of-tokens overlap lets a file like
+    ``김민지..._AI 치매예방돌봄 로봇 다솜.pptx`` pass into the
+    ``의약품 AI 심사`` category on the strength of the bare ``AI``
+    overlap, or into a 행안부-themed category on the strength of a
+    generic ``지원``/``운영``/``체계`` NNG overlap.  Restricting the
+    overlap check to NNP (proper noun) + SL≥3 (Latin word, e.g.
+    ``RTX``/``NIPA``/``Isaac``) + SH (Hanja word) eliminates that
+    class of leak while still letting genuine project markers
+    (``한양대``/``범정부``/``소프트뱅크``/``NIPA``) drive the rescue.
 
     Only project-style categories are considered — anything tagged as
     the catch-all ``misc`` is excluded.  When several windows match,
@@ -99,11 +103,12 @@ def _guess_by_time(entry, cats):
         d = entry.modified.date()
     except Exception:
         return None
-    file_toks = _filename_tokens(getattr(entry, "name", "") or "")
-    excerpt = (getattr(entry, "content_excerpt", "") or "")[:1200]
-    if excerpt:
-        # Reuse the same tokeniser on the body so 한국어 본문도 일관되게 처리.
-        file_toks = file_toks | _filename_tokens(excerpt)
+    file_pn = _proper_nouns_for_entry(entry)
+    if not file_pn:
+        # No proper-noun anchor in the file — refuse to guess.  The
+        # caller falls back to 기타, which is the safe answer for
+        # opaque/identity-less files.
+        return None
     best = None
     best_span = None
     for c in cats:
@@ -115,16 +120,8 @@ def _guess_by_time(entry, cats):
         start, end = rng
         if not (start <= d <= end):
             continue
-        # Time match alone is not enough — require some textual
-        # overlap with the category so we don't pull unrelated files
-        # in just because their mtime fell inside the project window.
-        cat_toks = _category_tokens(
-            {
-                "name": getattr(c, "name", "") or "",
-                "description": getattr(c, "description", "") or "",
-            }
-        )
-        if not _tokens_overlap(file_toks, cat_toks):
+        cat_pn = _proper_nouns_for_category(c)
+        if not (file_pn & cat_pn):
             continue
         span = (end - start).days
         if best is None or span < best_span:
@@ -277,17 +274,99 @@ def _filename_tokens(name: str) -> set[str]:
     return out
 
 
-def _category_tokens(category: dict) -> set[str]:
-    """Substantive tokens from a category's name + keywords + description."""
+def _category_tokens(category) -> set[str]:
+    """Substantive tokens from a category's name + keywords + description.
+
+    Accepts either a plain ``dict`` (used during the LLM-call hot path
+    where categories are still raw JSON) OR an object with ``.name`` /
+    ``.description`` / ``.keywords`` attributes (the dataclass form).
+    """
     parts: list[str] = []
-    for k in ("name", "description"):
-        v = category.get(k)
-        if isinstance(v, str):
-            parts.append(v)
-    kws = category.get("keywords") or []
-    if isinstance(kws, list):
-        parts.extend(str(k) for k in kws if k)
+    if isinstance(category, dict):
+        for k in ("name", "description"):
+            v = category.get(k)
+            if isinstance(v, str):
+                parts.append(v)
+        kws = category.get("keywords") or []
+        if isinstance(kws, list):
+            parts.extend(str(k) for k in kws if k)
+    else:
+        for k in ("name", "description"):
+            v = getattr(category, k, "") or ""
+            if isinstance(v, str):
+                parts.append(v)
+        kws = getattr(category, "keywords", None) or []
+        if isinstance(kws, list):
+            parts.extend(str(k) for k in kws if k)
     return _filename_tokens(" ".join(parts))
+
+
+@_lru_cache(maxsize=4096)
+def _proper_noun_tokens(text: str) -> frozenset[str]:
+    """Named-entity-shaped tokens only: NNP (proper noun) + SL≥3 +
+    SH, with person-name and clerical filters applied.
+
+    Used by the conservative ``시기로 추정`` rescue path
+    (:func:`_guess_by_time`) where we must NOT snap a file into a
+    project category just because their text shares generic NNG nouns
+    (``지원``/``운영``/``체계``) or 2-char ASCII abbreviations
+    (``AI``/``ML``).  See :func:`folderangel.morph.extract_proper_nouns`
+    for the underlying tag rules.
+    """
+    if not text:
+        return frozenset()
+    try:
+        from . import morph as _morph
+        return frozenset(_morph.extract_proper_nouns(text))
+    except Exception:
+        return frozenset()
+
+
+def _proper_nouns_for_entry(entry) -> frozenset[str]:
+    name = getattr(entry, "name", "") or ""
+    excerpt = (getattr(entry, "content_excerpt", "") or "")[:1200]
+    text = f"{name}\n{excerpt}".strip()
+    return _proper_noun_tokens(text)
+
+
+def _proper_nouns_for_category(category) -> frozenset[str]:
+    parts: list[str] = []
+    if isinstance(category, dict):
+        for k in ("name", "description"):
+            v = category.get(k)
+            if isinstance(v, str):
+                parts.append(v)
+        kws = category.get("keywords") or []
+        if isinstance(kws, list):
+            parts.extend(str(k) for k in kws if k)
+    else:
+        for k in ("name", "description"):
+            v = getattr(category, k, "") or ""
+            if isinstance(v, str):
+                parts.append(v)
+        kws = getattr(category, "keywords", None) or []
+        if isinstance(kws, list):
+            parts.extend(str(k) for k in kws if k)
+    return _proper_noun_tokens(" ".join(parts))
+
+
+def _is_substantive_token(t: str) -> bool:
+    """Whether a single token carries enough specificity to count as
+    evidence of category membership.
+
+    Two-letter ASCII tokens (AI / ML / VR / UX / NLP-style abbreviations)
+    appear in almost every filename AND almost every category name in
+    a tech-leaning Korean corpus, so they are not evidence of any
+    *specific* project.  Past leak: every student presentation matched
+    every AI project category through the bare "ai" token.
+
+    A 2-character *Korean* token, by contrast, is a full word
+    (감정 / 분석 / 로봇 / 발표) — denser than a 2-char ASCII abbreviation
+    — and stays admissible.
+    """
+    if len(t) >= 3:
+        return True
+    return any("가" <= ch <= "힣" for ch in t)
 
 
 def _tokens_overlap(file_toks: set[str], cat_toks: set[str]) -> bool:
@@ -295,16 +374,23 @@ def _tokens_overlap(file_toks: set[str], cat_toks: set[str]) -> bool:
     common 4-character prefix.  Tolerates real-world variants like
     "projx" vs "projectx" and "한국지역정보개발원" vs "한국지역" while
     still vetoing unrelated tokens like "rtx" vs "한양대".
+
+    *Generic 2-char ASCII tokens never count as overlap.*  In an
+    AI-heavy Korean corpus, "ai" appears in essentially every filename
+    AND every category name; allowing it as evidence collapses every
+    file into the largest AI project bucket.  Korean 2-char tokens
+    remain admissible — they are full words, not acronyms.
     """
     if not file_toks or not cat_toks:
         return False
-    if file_toks & cat_toks:
+    common = file_toks & cat_toks
+    if any(_is_substantive_token(t) for t in common):
         return True
     for ft in file_toks:
-        if len(ft) < 3:
+        if not _is_substantive_token(ft):
             continue
         for ct in cat_toks:
-            if len(ct) < 3:
+            if not _is_substantive_token(ct):
                 continue
             if ft in ct or ct in ft:
                 return True

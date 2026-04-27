@@ -67,6 +67,16 @@ def is_available() -> bool:
 # given-name letters in the same morpheme is the classic person-name
 # shape — we filter those out aggressively because they almost never
 # carry project identity.
+# Institution / agency name suffixes.  When a 2–3 char Korean NNP
+# ends with one of these, it's almost certainly an organisation name
+# (한양대 / 행안부 / 인사원 / 조달청 / 도서관) — NOT a person — and
+# must escape the surname-based person filter below.
+_INSTITUTION_SUFFIXES = (
+    "대", "원", "부", "청", "처", "사", "회", "단", "관", "팀", "실",
+    "국", "소", "교", "당", "위", "부처", "공사", "공단", "협회",
+)
+
+
 _PERSON_SURNAMES = {
     "김", "이", "박", "최", "정", "강", "조", "윤", "장", "임", "한",
     "오", "서", "신", "권", "황", "안", "송", "전", "홍", "유", "고",
@@ -103,6 +113,102 @@ _FALLBACK_TOKEN_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣0-9]+")
 
 
 # ----- main API ------------------------------------------------------------
+
+def extract_proper_nouns(text: str) -> list[str]:
+    """Extract *named-entity-shaped* tokens: NNP (proper noun) +
+    SL≥3 (Latin word, e.g. brand acronyms like ``RTX``, ``NIPA``) +
+    SH (Hanja word) + NNG≥3 (Korean compound noun of length 3+).
+
+    The NNG-length floor is the load-bearing rule: kiwi splits Korean
+    compounds aggressively (``로봇공학`` → ``로봇`` + ``공학``,
+    ``치매예방돌봄`` → ``치매`` + ``예방`` + ``돌봄``), and the
+    resulting 2-char NNG morphemes (``지원``/``운영``/``체계``/
+    ``로봇``/``공학``/``기술``/``시스템``…) appear in essentially
+    every filename and every category name in a tech-leaning Korean
+    corpus, so they cannot serve as evidence of *specific* category
+    membership.  3-char NNG tokens (``의약품``/``행안부``/``제안서``)
+    are dense enough to be project markers — kiwi often miscategorises
+    institution acronyms (``행안부`` = 행정안전부) as NNG, and we
+    don't want to lose those.
+
+    Same noise filters as :func:`extract_nouns` (person names dropped,
+    digits/extensions dropped, clerical nouns dropped).  Order: order
+    of first appearance.
+    """
+    if not text:
+        return []
+    kiwi = _get_kiwi()
+    if kiwi is None:
+        # No kiwi → can't reliably tell named entities from common
+        # nouns.  Return nothing so callers fall back to a coarser
+        # matching strategy rather than over-trusting a regex split.
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    try:
+        tokens = list(kiwi.tokenize(text))
+    except Exception:
+        return []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        form = (tok.form or "").strip()
+        tag = tok.tag
+        if not form:
+            i += 1
+            continue
+        # Tag-based admissibility.
+        if tag in ("NNP", "SH"):
+            pass  # always admissible (after filters below)
+        elif tag == "SL":
+            if len(form) < 3:
+                i += 1
+                continue
+        elif tag == "NNG":
+            if len(form) < 3:
+                i += 1
+                continue
+        else:
+            i += 1
+            continue
+        norm = form.casefold() if tag == "SL" else form
+        if _DIGITS_ONLY.match(norm) or _EXT_LIKE.match(norm):
+            i += 1
+            continue
+        if norm in _NOISE_NOUNS:
+            i += 1
+            continue
+        # Surname-only NNP followed by a 1–2 char given-name NNP/NNG
+        # is a person — drop both.
+        if len(norm) == 1 and norm in _PERSON_SURNAMES:
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            if nxt is not None and nxt.tag in ("NNG", "NNP") and 1 <= len(nxt.form) <= 2:
+                i += 2
+                continue
+        # Multi-char Korean NNP that LOOKS like a person name (surname
+        # at position 0 + 1–2 char given-name suffix).  Kiwi often
+        # tags "김민지" as a single NNP, which we don't want to count
+        # as a project marker.  Skip when len ∈ {2, 3} AND first
+        # char is a known surname — UNLESS the token ends with a
+        # well-known institution suffix (한양대 / 행안부 / 인사원),
+        # which signals an organisation, not a person.
+        if (
+            tag == "NNP"
+            and 2 <= len(norm) <= 3
+            and norm[0] in _PERSON_SURNAMES
+            and all("가" <= ch <= "힣" for ch in norm)
+            and not norm.endswith(_INSTITUTION_SUFFIXES)
+        ):
+            i += 1
+            continue
+        if norm in seen or len(norm) < 2:
+            i += 1
+            continue
+        out.append(norm)
+        seen.add(norm)
+        i += 1
+    return out
+
 
 def extract_nouns(text: str, *, top_k: Optional[int] = None) -> list[str]:
     """Extract project-identity nouns from *text*, ordered by first

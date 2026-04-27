@@ -634,6 +634,110 @@ def test_time_guess_requires_token_overlap_with_category(tmp_path):
     )
 
 
+def test_time_guess_rejects_generic_two_letter_ascii_overlap(tmp_path):
+    """A 2-char ASCII abbreviation like "AI" / "ML" / "VR" appears in
+    almost every filename AND every category name in an AI-leaning
+    corpus, so it must not by itself satisfy the token-overlap check.
+    Past leak: every student presentation got snapped to a drug-AI
+    project just because both contained "AI".
+    """
+    from datetime import datetime, timezone
+    from folderangel.models import Category
+    from folderangel.planner import _guess_by_time, _tokens_overlap
+
+    drug_ai = [
+        Category(
+            id="drug-ai-project",
+            name="의약품 AI 심사 및 산업지원 체계 구축",
+            description="의약품 AI 심사·산업지원 사업",
+            time_label="2025-2026",
+            duration="multi-year",
+            group=1,
+        ),
+        Category(id="misc", name="기타", description="", group=9),
+    ]
+    in_window_ts = datetime(2025, 11, 1, tzinfo=timezone.utc).timestamp()
+
+    # Real student-presentation filenames the user reported.  Each has
+    # "AI" in its name and falls inside the drug-AI project's window —
+    # but shares no SUBSTANTIVE token with the project's name.
+    student_files = [
+        "김민지kimminji2031_197578_10350428_11주차_ AI 치매예방돌봄 로봇 다솜.pptx",
+        "조수빈chosubin2095_223631_10348706_로봇 공학_조수빈 2023038095.pptx",
+        "김이은kimieun2021_222707_10357446_로봇 공학_ 로봇의 설계, 제작 및 운영을 지원하는 AI 기술.pptx",
+        "장윤성jangyoonsung2009_225560_10350506_로봇의 두뇌를 학습시키는 가상 세계, NVIDIA Isaac.pptx",
+        "박규리parkgyuri2016_224614_10409047_소프트뱅크-softvoice.pptx",
+        "이서진leeseojin2066_224805_10418060_12 KT의 믿음_이서진.pptx",
+    ]
+    for fname in student_files:
+        e = _entry(fname, ts=in_window_ts, content="")
+        guess = _guess_by_time(e, drug_ai)
+        assert guess is None, (
+            f"student presentation '{fname}' was snapped to '{guess}' on "
+            f"the strength of a bare 'AI' overlap — _is_substantive_token "
+            f"should reject 2-char ASCII abbreviations"
+        )
+
+    # Direct unit assertions on _tokens_overlap so a future edit to
+    # _guess_by_time can't silently bypass this rule.
+    assert _tokens_overlap({"ai"}, {"ai", "의약품"}) is False
+    assert _tokens_overlap({"ai", "ml"}, {"ai", "ml", "의약품"}) is False
+    assert _tokens_overlap({"의약품", "ai"}, {"ai", "의약품"}) is True
+    # Korean 2-char tokens (감정/분석/로봇) are still substantive.
+    assert _tokens_overlap({"감정", "분석"}, {"감정", "분석", "ai"}) is True
+    assert _tokens_overlap({"로봇"}, {"로봇", "공학"}) is True
+
+
+def test_proper_noun_extraction_restricts_to_named_entities():
+    """The ``_guess_by_time`` rescue path must extract NNP + SL≥3 + SH +
+    NNG≥3 only — generic NNG (지원/운영/체계) and 2-char ASCII (AI/ML)
+    must NOT survive into the proper-noun set, because they're the
+    tokens that caused the original "시기로 추정" leak.
+    """
+    from folderangel.morph import extract_proper_nouns, is_available
+
+    if not is_available():
+        import pytest
+        pytest.skip("kiwipiepy not installed in this environment")
+
+    # The leak signal: "AI 지원 운영 체계 구축" is pure generic
+    # vocabulary — must yield NO proper nouns.
+    pn = set(extract_proper_nouns("AI 지원 운영 체계 구축 심사 산업"))
+    assert pn == set(), (
+        f"generic NNG/SL2 tokens leaked into proper-noun set: {pn}"
+    )
+
+    # Real project markers must come through.
+    pn = set(extract_proper_nouns("한양대 인간-인공지능 협업"))
+    assert "한양대" in pn, (
+        f"한양대 (NNP institution) missing from proper nouns: {pn}"
+    )
+
+    pn = set(extract_proper_nouns("의약품 AI 심사 및 산업지원"))
+    assert "의약품" in pn, (
+        f"의약품 (3-char NNG domain word) missing: {pn}"
+    )
+    assert "ai" not in pn, "2-char SL must be excluded"
+    assert "지원" not in pn, "2-char NNG must be excluded"
+
+    pn = set(extract_proper_nouns("행안부 범정부 AI 공통기반"))
+    assert "행안부" in pn, (
+        f"행안부 (3-char institution acronym) missing: {pn}"
+    )
+
+    # Person names must NOT leak as project markers.
+    pn = set(extract_proper_nouns("김민지 kimminji 박규리 parkgyuri"))
+    assert "김민지" not in pn, f"김민지 leaked as proper noun: {pn}"
+    assert "박규리" not in pn, f"박규리 leaked as proper noun: {pn}"
+    # Latin variants (≥3 chars) DO survive — they're useful as
+    # filename-fingerprint tokens for student-project matching.
+    assert "kimminji" in pn
+
+    # Brand acronyms ≥ 3 chars: kept.
+    pn = set(extract_proper_nouns("RTX PRO 6000 GPU 3대 구매"))
+    assert "rtx" in pn and "gpu" in pn
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to
