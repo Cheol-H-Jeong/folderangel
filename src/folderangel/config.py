@@ -186,6 +186,14 @@ class Config:
     # because they share clerical Korean nouns.  0 disables the check.
     outlier_min_similarity: float = 0.45
 
+    # Minimum files per folder.  After the rolling planner has placed
+    # every file, any category with fewer members than this gets
+    # absorbed into the closest larger category by proper-noun overlap
+    # — or to "기타" when no good match exists.  Set to 1 to disable.
+    # 3 is the default because real users see 1- and 2-file folders as
+    # clutter ("자잘한 폴더").
+    min_category_size: int = 3
+
     # Reasoning / "thinking" mode for Qwen3 / DeepSeek-R1 / Magistral /
     # Phi-4-mini-reasoning style models.
     #   "off"  — disable thinking (default, much faster for our JSON task)

@@ -487,6 +487,7 @@ class Planner:
         (Gemini's REST client has no stream_text support — we fall back
         to plain non-streaming behaviour for it).
         """
+        import time as _time
         stream_state = {
             "chars": 0,
             "preview": "",
@@ -494,6 +495,8 @@ class Planner:
             "buffer": "",        # rolling tail to recover whole chars across chunks
             "last_emit_ts": 0.0,
             "last_shown": "",
+            "start_ts": _time.monotonic(),
+            "first_token_ts": 0.0,   # 0 until the first stream chunk arrives
         }
 
         import re as _re
@@ -529,6 +532,8 @@ class Planner:
 
         def _on_stream(chunk: str, total: int):
             stream_state["chars"] = total
+            if stream_state["first_token_ts"] == 0.0 and total > 0:
+                stream_state["first_token_ts"] = _time.monotonic()
             if progress is None:
                 return
             from .llm.client import _looks_like_mojibake
@@ -558,22 +563,60 @@ class Planner:
                 return
             stream_state["last_emit_ts"] = now
             stream_state["last_shown"] = shown
-            progress(f"{stream_label}: {total}자 수신 중 — {shown}", -1.0)
+            elapsed = now - stream_state["start_ts"]
+            ttft = (
+                stream_state["first_token_ts"] - stream_state["start_ts"]
+                if stream_state["first_token_ts"] else 0.0
+            )
+            rate = total / elapsed if elapsed > 0.5 else 0.0
+            progress(
+                f"{stream_label}: {elapsed:.0f}초 / {total}자 수신 / "
+                f"TTFT {ttft:.1f}초 / {rate:.0f}자·s — {shown}",
+                -1.0,
+            )
+
+        # Wrap the user-supplied heartbeat so that even *between* stream
+        # chunks the user sees the live char count + TTFT, not just
+        # "{label} … N초 경과".  This is the difference between "looks
+        # frozen" and "I can see it's actually generating".
+        def _wrapped_heartbeat(elapsed_s: float):
+            if heartbeat is None:
+                return
+            chars = stream_state["chars"]
+            ttft = (
+                stream_state["first_token_ts"] - stream_state["start_ts"]
+                if stream_state["first_token_ts"] else 0.0
+            )
+            if chars > 0:
+                # Streaming is live — push a status line every heartbeat
+                # tick that includes the running count.
+                if progress is not None:
+                    rate = chars / elapsed_s if elapsed_s > 0.5 else 0.0
+                    progress(
+                        f"{stream_label}: {elapsed_s:.0f}초 / {chars}자 수신 / "
+                        f"TTFT {ttft:.1f}초 / {rate:.0f}자·s",
+                        -1.0,
+                    )
+            else:
+                # Pre-first-token — fall back to the original heartbeat
+                # so the user at least sees "still waiting".
+                heartbeat(elapsed_s)
 
         try:
             return self.gemini.generate_json(
                 prompt,
-                heartbeat=heartbeat,
+                heartbeat=_wrapped_heartbeat,
                 cancel_check=self.cancel_check,
                 stream_text=_on_stream,
             )
         except TypeError:
             try:
                 return self.gemini.generate_json(
-                    prompt, heartbeat=heartbeat, cancel_check=self.cancel_check
+                    prompt, heartbeat=_wrapped_heartbeat,
+                    cancel_check=self.cancel_check,
                 )
             except TypeError:
-                return self.gemini.generate_json(prompt, heartbeat=heartbeat)
+                return self.gemini.generate_json(prompt, heartbeat=_wrapped_heartbeat)
 
     def _check_cancel(self) -> None:
         if self.cancel_check is not None and self.cancel_check():
@@ -1010,6 +1053,73 @@ class Planner:
                     "secondary": [],
                     "reason": reason,
                 })
+
+        # ------------------------------------------------------------------
+        # Singleton absorption — no matter how strictly we instruct the
+        # LLM, real corpora always produce some 1- or 2-file categories
+        # that the user reads as clutter.  After all chunks +
+        # consolidation are done, count members per category; anything
+        # below ``min_category_size`` (default 3) gets absorbed into the
+        # closest larger category by proper-noun overlap, or to misc if
+        # no good match.
+        # ------------------------------------------------------------------
+        min_size = int(getattr(self.config, "min_category_size", 3) or 3)
+        if min_size >= 2:
+            from collections import Counter
+            from . import similarity as _sim
+            counts = Counter(a["primary"] for a in out_assigns)
+            small_ids = {
+                cid for cid, n in counts.items()
+                if n < min_size and cid != "misc"
+            }
+            if small_ids:
+                cat_by_id = {(c.get("id") or ""): c for c in cum_cats}
+                # Index large categories by their proper-noun set so we
+                # can find the closest match for an absorbed singleton.
+                large_pn: dict[str, frozenset[str]] = {}
+                for cid, n in counts.items():
+                    if n >= min_size and cid != "misc" and cid in cat_by_id:
+                        large_pn[cid] = _sim._proper_nouns(
+                            (cat_by_id[cid].get("name", "") or "")
+                            + " " + (cat_by_id[cid].get("description", "") or "")
+                        )
+                redirect: dict[str, str] = {}
+                for sid in small_ids:
+                    sc = cat_by_id.get(sid)
+                    if sc is None:
+                        redirect[sid] = "misc"
+                        continue
+                    s_pn = _sim._proper_nouns(
+                        (sc.get("name", "") or "")
+                        + " " + (sc.get("description", "") or "")
+                    )
+                    best = None
+                    best_overlap = 0
+                    for lid, l_pn in large_pn.items():
+                        common = len(s_pn & l_pn)
+                        if common > best_overlap:
+                            best_overlap = common
+                            best = lid
+                    redirect[sid] = best if best else "misc"
+                if progress:
+                    moved = sum(counts[s] for s in small_ids)
+                    progress(
+                        f"plan: rolling — 자잘한 카테고리 {len(small_ids)}개 "
+                        f"({moved}파일) 흡수: 큰 카테고리/기타로 통합",
+                        0.96,
+                    )
+                # Apply: rewrite assignments + drop the small cats.
+                for a in out_assigns:
+                    if a["primary"] in redirect:
+                        a["primary"] = redirect[a["primary"]]
+                        a["reason"] = (
+                            (a.get("reason") or "")
+                            + f" · 자잘 폴더 흡수"
+                        ).strip(" ·")
+                cum_cats = [
+                    c for c in cum_cats
+                    if (c.get("id") or "") not in small_ids
+                ]
 
         # Convert cumulative categories into the same shape ``_plan_from_dict``
         # expects.  Group is mandatory — coerce to 9 if missing.

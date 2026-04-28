@@ -515,6 +515,10 @@ def test_rolling_end_to_end_with_fake_llm(tmp_path):
     cfg.model = "gemini-2.5-flash"
     cfg.reclassify_mode = True
     cfg.small_corpus_files = 1   # force out of "small" tier
+    cfg.min_category_size = 1    # disable singleton absorption — this
+                                 # test checks raw rolling behaviour, the
+                                 # singleton absorption pass has its own
+                                 # dedicated test below.
 
     seen_prompts: list[str] = []
 
@@ -572,6 +576,79 @@ def test_rolling_end_to_end_with_fake_llm(tmp_path):
     drug = [a for a in plan.assignments
             if a.file_path.name.startswith("의약품")]
     assert drug[0].primary_category_id == "drug-ai"
+
+
+def test_singleton_absorption_collapses_tiny_categories():
+    """A category with only 1–2 members must be absorbed into the
+    closest larger category (proper-noun overlap) or into misc, so
+    the user does not see a forest of 1-file folders.
+    """
+    from folderangel.planner import Planner
+
+    cfg = Config()
+    cfg.model = "gemini-2.5-flash"
+    cfg.reclassify_mode = True
+    cfg.small_corpus_files = 1
+    cfg.min_category_size = 3   # default — but state it for the test record
+
+    class _Fake:
+        def generate_json(self, prompt, **_kw):
+            import re
+            ids = [
+                int(m.group(1)) for m in re.finditer(
+                    r'\{"i":(\d+),"n":"([^"]+)"', prompt
+                )
+            ]
+            files = list(re.finditer(r'\{"i":(\d+),"n":"([^"]+)"', prompt))
+            new_cats = [
+                {"id": "lecture-ai", "name": "AI 강의자료",
+                 "description": "AI 수업 발표·과제",
+                 "duration": "annual", "time_label": "2025", "group": 1},
+                {"id": "drug-ai", "name": "의약품 AI 심사",
+                 "description": "의약품 AI 심사 사업",
+                 "duration": "annual", "time_label": "2025", "group": 2},
+                {"id": "rtx-buy", "name": "RTX GPU 구매계약",
+                 "description": "RTX 구매 1건",
+                 "duration": "burst", "time_label": "2025", "group": 3},
+            ]
+            assigns = []
+            for m in files:
+                fid, fname = int(m.group(1)), m.group(2)
+                if "강의" in fname or "AI 발표" in fname:
+                    cid = "lecture-ai"
+                elif "의약품" in fname:
+                    cid = "drug-ai"
+                elif "RTX" in fname:
+                    cid = "rtx-buy"
+                else:
+                    cid = "misc"
+                assigns.append({"i": fid, "c": cid, "p": 0.9, "r": "fake"})
+            return {"new_categories": new_cats, "assignments": assigns}
+
+    # 50 lecture files (large), 2 drug-ai (small), 1 rtx (singleton),
+    # plus 1 odd file → ≥ MIN_CHUNK_FILES so rolling fires.
+    entries = (
+        [_entry(f"AI 발표_{i:03}.pptx", content="AI 강의 발표") for i in range(50)]
+        + [_entry("의약품 AI 제안서.pdf", content="의약품 AI 제안서"),
+           _entry("의약품 AI 보고서.pdf", content="의약품 AI 보고서")]
+        + [_entry("RTX 구매계약.pdf", content="RTX 구매 계약")]
+    )
+
+    # Bypass should_use_rolling tier checks by calling _rolling_plan directly,
+    # then feeding through _plan_from_dict to apply singleton absorption.
+    p = Planner(cfg, gemini=_Fake())
+    payloads = [e.to_summary_dict() for e in entries]
+    raw = p._rolling_plan(entries, payloads, progress=None)
+    from folderangel.planner import _plan_from_dict
+    plan = _plan_from_dict(raw, entries, reclassify_mode=True)
+    cat_ids = {c.id for c in plan.categories}
+    assert "lecture-ai" in cat_ids
+    # drug-ai (2 files < 3) and rtx-buy (1 file < 3) must be absorbed.
+    assert "drug-ai" not in cat_ids, f"singleton drug-ai survived: {cat_ids}"
+    assert "rtx-buy" not in cat_ids, f"singleton rtx-buy survived: {cat_ids}"
+    # Their assignments are redirected — never left dangling.
+    assert all(a.primary_category_id in cat_ids | {"misc"}
+               for a in plan.assignments)
 
 
 def test_tier_picker_picks_correct_tier():
