@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
@@ -266,7 +266,9 @@ def compute_chunk_size(effective_ctx: int, n_categories_estimate: int) -> int:
 ROLLING_SYSTEM = """너는 파일을 사업/과제/프로젝트/기관/목적·용도 단위 폴더로 정리하는 전문가다.
 
 지금까지 합의된 폴더 목록(`categories_so_far`)과 새로 분류해야 할 파일(`files`)을 받는다.
-files 의 각 파일은 정수 fid("i") + 파일명("n") + modified 일자("m") + 부모 단서("p") 로 표현된다.
+files 의 각 파일은 정수 fid("i") + 파일명("n") + modified 일자("m") + 부모 단서("p")
++ 확장자("x") + 동일-패턴 멤버 수("c", 1보다 크면 그 만큼의 파일이 같은 행으로 묶여
+이 row 와 같은 카테고리에 가는 것임) 으로 표현된다.
 
 각 파일에 대해 둘 중 하나만 한다:
   1) categories_so_far 중 정말 어울리는 것이 있다 → primary 에 그 id
@@ -289,6 +291,17 @@ files 의 각 파일은 정수 fid("i") + 파일명("n") + modified 일자("m") 
   목록 안에 3개 이상 있을 가능성**을 먼저 점검하라. 가능성이 낮으면 만들지 말고
   비슷한 기존 카테고리에 보낸다.
 - 정말 단서 없는 파일만 "기타"(misc)로.
+
+**같은 패턴 / 같은 확장자 묶기 (HARD RULE)**:
+- *제목 패턴이 명백히 같은* 파일들 (prefix 가 같고 끝의 일자·버전·번호만
+  다른 류 — 예: "강의평가_2025-01-08.pdf" / "강의평가_2025-01-15.pdf"
+  / "강의평가_사회과목.pdf") 은 **반드시 한 폴더로** 묶어라.
+- 같은 사업/주제의 파일들이 *같은 확장자로 반복되는 batch 류* 도 한
+  폴더로 묶어라.  예: 영수증 6개 (.pdf), 강의 슬라이드 12개 (.pptx),
+  녹화 영상 10개 (.mp4) — 각각 하나의 폴더.
+- 단, **확장자만 같다고 묶지는 마라**.  PDF 라는 이유만으로 의약품 사업
+  PDF와 학생 발표 PDF를 같은 폴더에 넣지 말 것.  사업/주제 또는 패턴이
+  먼저 일치해야 한다.
 - 파일명을 응답에 다시 적지 마라 — fid("i")만 사용."""
 
 
@@ -364,7 +377,9 @@ class FileRow:
     name: str
     modified: str
     parent_hint: str
-    members: list[FileEntry]   # all entries collapsed into this row
+    ext: str = ""              # ".pdf" / ".mp4" / "" — surfaced to the LLM
+    count: int = 1             # how many files this row represents
+    members: list[FileEntry] = field(default_factory=list)
 
 
 def build_rows(
@@ -396,6 +411,7 @@ def build_rows(
                     parent = "[folder]" if reclassify_mode else Path(e.path).parent.name
                 except Exception:
                     parent = ""
+            ext = (getattr(e, "ext", "") or "").lower()
             row = FileRow(
                 fid=fid_counter,
                 name=e.name or "",
@@ -405,10 +421,12 @@ def build_rows(
                     else ""
                 ),
                 parent_hint=parent,
+                ext=ext,
                 members=[],
             )
             by_sig[sig] = row
         row.members.append(e)
+        row.count = len(row.members)
     # Stable order: sort by signature so similar files cluster in
     # adjacent rows (helps the LLM see "all 약관 files together").
     rows = list(by_sig.values())
@@ -420,12 +438,17 @@ def build_rows(
 
 
 def row_to_payload(row: FileRow) -> dict:
-    return {
+    payload = {
         "i": row.fid,
         "n": row.name,
         "m": row.modified,
         "p": row.parent_hint,
     }
+    if row.ext:
+        payload["x"] = row.ext            # surface extension as its own field
+    if row.count > 1:
+        payload["c"] = row.count          # so LLM knows this row stands for N siblings
+    return payload
 
 
 # --- main entry point -----------------------------------------------------

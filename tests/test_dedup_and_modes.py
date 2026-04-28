@@ -253,3 +253,99 @@ def test_additive_mode_seeds_only_fa_folders(tmp_path):
     # FA seed retains its signature in the slug for stable reuse on
     # next compose_folder_name call.
     assert any(s["id"].endswith("-a3b9c1") for s in fa_only)
+
+
+def test_compatibility_pulls_same_pattern_files_together():
+    """Two files with the same prefix pattern but different
+    date/version suffixes must score *higher* against a category
+    seeded with their siblings than against an unrelated category.
+    The user's pain: 강의평가_*.pdf siblings landed in different
+    singleton folders because the old weights ignored title pattern.
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from folderangel.models import Category, FileEntry
+    from folderangel import similarity as sim
+
+    def E(name, ext=".pdf"):
+        dt = datetime.now(tz=timezone.utc)
+        return FileEntry(
+            path=Path(f"/x/{name}"), name=name, ext=ext, size=1, mime="",
+            created=dt, modified=dt, accessed=dt, content_excerpt="",
+        )
+
+    eval_a = sim.signals_for_entry(E("강의평가_2025-01-08.pdf"))
+    eval_b = sim.signals_for_entry(E("강의평가_2025-01-15.pdf"))
+    eval_c = sim.signals_for_entry(E("강의평가_사회과목.pdf"))
+    drug_a = sim.signals_for_entry(E("의약품 AI 심사 제안서.pdf"))
+    drug_b = sim.signals_for_entry(E("의약품 AI 심사 보고서.pdf"))
+
+    cat_eval = Category(id="lecture-eval", name="강의 평가",
+                        description="", time_label="", duration="mixed", group=1)
+    cat_drug = Category(id="drug-ai", name="의약품 AI 심사",
+                        description="", time_label="", duration="mixed", group=2)
+
+    eval_sig = sim.category_signals(cat_eval, members=[eval_a, eval_b])
+    drug_sig = sim.category_signals(cat_drug, members=[drug_a, drug_b])
+
+    # New 강의평가 file should score way higher against the eval cat
+    # than against the drug cat, even though both have ".pdf".
+    s_match = sim.compatibility(eval_c, eval_sig)
+    s_other = sim.compatibility(eval_c, drug_sig)
+    assert s_match > s_other + 0.10, (
+        f"pattern signal too weak: match={s_match:.3f} vs other={s_other:.3f}"
+    )
+
+
+def test_extension_boost_clusters_media_batch():
+    """A run of .mp4 files with shared name prefix should cluster on
+    extension + pattern even when proper-noun overlap is sparse."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from folderangel.models import Category, FileEntry
+    from folderangel import similarity as sim
+
+    def E(name, ext):
+        dt = datetime.now(tz=timezone.utc)
+        return FileEntry(
+            path=Path(f"/x/{name}"), name=name, ext=ext, size=1, mime="",
+            created=dt, modified=dt, accessed=dt, content_excerpt="",
+        )
+
+    # Distinctive .mp4 batch — same prefix pattern.
+    a = sim.signals_for_entry(E("회의녹화_2025-04-01.mp4", ".mp4"))
+    b = sim.signals_for_entry(E("회의녹화_2025-04-08.mp4", ".mp4"))
+    c = sim.signals_for_entry(E("회의녹화_2025-04-15.mp4", ".mp4"))
+    cat = Category(id="meeting-rec", name="회의 녹화",
+                   description="", time_label="", duration="mixed", group=1)
+    cat_sig = sim.category_signals(cat, members=[a, b])
+    score = sim.compatibility(c, cat_sig)
+    assert score >= 0.5, f"same-prefix .mp4 batch score too low: {score:.3f}"
+
+
+def test_generic_pdf_alone_does_not_force_match():
+    """Two files that share *only* ``.pdf`` (no pattern, no nouns)
+    must NOT score above the singleton-absorption threshold (0.20)
+    in reclassify mode — which is where the real planner runs."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from folderangel.models import Category, FileEntry
+    from folderangel import similarity as sim
+
+    def E(name, parent, ext=".pdf"):
+        dt = datetime.now(tz=timezone.utc)
+        return FileEntry(
+            path=Path(f"/{parent}/{name}"), name=name, ext=ext, size=1, mime="",
+            created=dt, modified=dt, accessed=dt, content_excerpt="",
+        )
+
+    student = sim.signals_for_entry(E("김민지kimminji_과제11.pdf", "lecture"))
+    drug_a = sim.signals_for_entry(E("의약품 AI 심사 제안서.pdf", "drug"))
+    drug_b = sim.signals_for_entry(E("의약품 AI 심사 보고서.pdf", "drug"))
+    cat = Category(id="drug-ai", name="의약품 AI 심사",
+                   description="", time_label="", duration="mixed", group=1)
+    cat_sig = sim.category_signals(cat, members=[drug_a, drug_b])
+    score = sim.compatibility(student, cat_sig, reclassify_mode=True)
+    assert score < 0.20, (
+        f"generic .pdf overlap leaked student → drug-ai: {score:.3f}"
+    )

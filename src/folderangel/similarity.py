@@ -162,6 +162,7 @@ class Signals:
     raw_stem: str = ""
     core_stem: str = ""
     schema: str = ""
+    ext: str = ""                  # ".pdf" / ".mp4" / "" — driver for S6
     name_pn: frozenset[str] = field(default_factory=frozenset)
     body_pn: frozenset[str] = field(default_factory=frozenset)
     modified: Optional[date] = None
@@ -198,11 +199,17 @@ def signals_for_entry(entry) -> Signals:
     except Exception:
         modified = None
 
+    ext = (getattr(entry, "ext", None) or "").lower()
+    if not ext:
+        m = re.search(r"\.([A-Za-z0-9]{1,6})$", name)
+        ext = ("." + m.group(1).lower()) if m else ""
+
     return Signals(
         path=getattr(entry, "path", None),
         raw_stem=raw_stem,
         core_stem=core_stem,
         schema=_schema_sequence(raw_stem),
+        ext=ext,
         name_pn=name_pn,
         body_pn=body_pn,
         modified=modified,
@@ -313,29 +320,107 @@ def s5_body(file: Signals, target_pn: frozenset[str]) -> float:
     return _jaccard(file.body_pn, target_pn)
 
 
+# Generic clerical extensions that nearly every corpus has — matching
+# on these alone (every PDF together) is the failure mode the system
+# prompt warns against ("확장자 기반 분류 절대 금지").  We still let
+# extension contribute, but cap the score against these so the LLM is
+# *only nudged*, not steered, by ext alone.
+_GENERIC_EXTS = {
+    ".pdf", ".docx", ".doc", ".txt", ".md", ".html", ".htm",
+    ".png", ".jpg", ".jpeg", ".gif",
+}
+
+
+def s6_extension(file: Signals, target_exts: frozenset[str]) -> float:
+    """Extension match — strong for distinctive extensions (.mp4 / .zip /
+    .hwp / .xlsx batches), weak for "everything is a .pdf" cases.
+
+    Returns 1.0 when ``file.ext`` matches any member's ext AND the ext
+    is reasonably specific; 0.5 for matches on generic extensions
+    (.pdf / .png / etc — common across the whole corpus); 0 for no
+    match.
+    """
+    if not file.ext or not target_exts:
+        return 0.0
+    if file.ext not in target_exts:
+        return 0.0
+    return 0.5 if file.ext in _GENERIC_EXTS else 1.0
+
+
+def s7_literal_prefix(file: Signals, target_stems: list[str]) -> float:
+    """Longest literal common prefix between ``file.raw_stem`` and any
+    member stem, normalised by the file's own stem length.  Catches
+    same-prefix batches that share NO proper nouns (e.g.
+    ``강의평가_2025-01-08`` / ``강의평가_사회과목`` collapse on the
+    literal prefix ``강의평가_`` even when kiwi drops every 2-char
+    NNG to nothing).
+    """
+    src = file.raw_stem or ""
+    if not src or not target_stems:
+        return 0.0
+    best = 0
+    for t in target_stems:
+        if not t:
+            continue
+        n = 0
+        for ch_a, ch_b in zip(src, t):
+            if ch_a == ch_b:
+                n += 1
+            else:
+                break
+        if n > best:
+            best = n
+    if best < 2:
+        return 0.0
+    # Normalise by the SHORTER stem (so "강의평가" ⊂ "강의평가_사회"
+    # scores as 1.0, not 0.4 because of the longer side).
+    shortest = min(
+        len(src),
+        min((len(t) for t in target_stems if t), default=len(src)),
+    )
+    return min(1.0, best / max(1, shortest))
+
+
 # --- composite ------------------------------------------------------------
 
 @dataclass
 class Weights:
-    s1: float = 0.27
-    s2: float = 0.27
-    s3: float = 0.095
-    s4: float = 0.27
-    s5: float = 0.095
+    """Multi-axis compatibility weights.
+
+    Tuned for the user-reported failure where files with similar
+    title patterns or matching extensions kept getting split into
+    sibling singleton folders.  S7 (literal prefix overlap) is the
+    main pull for batch-file pattern matching ("강의평가_*" series).
+    S6 (extension) and S2 (abstract schema) provide weaker but
+    additive signals.  S4 (parent path) drops to a minor role
+    because reclassify mode zeroes it anyway.
+    """
+    s1: float = 0.20       # filename-core proper-noun Jaccard
+    s2: float = 0.15       # filename schema/pattern similarity (abstract)
+    s3: float = 0.05       # modified-time proximity
+    s4: float = 0.10       # scan-time path co-residence
+    s5: float = 0.10       # body-head proper-noun Jaccard
+    s6: float = 0.15       # extension match
+    s7: float = 0.25       # ★ literal name-prefix overlap (new axis)
 
     def reclassify(self) -> "Weights":
         """S4 is unreliable when the user is escaping the existing
-        layout — disable it and renormalise.
+        layout — disable it and renormalise the rest.
         """
-        keep = self.s1 + self.s2 + self.s3 + self.s5
+        keep = self.s1 + self.s2 + self.s3 + self.s5 + self.s6 + self.s7
         if keep <= 0:
-            return Weights(s1=0.4, s2=0.4, s3=0.1, s4=0.0, s5=0.1)
+            return Weights(
+                s1=0.22, s2=0.17, s3=0.05, s4=0.0,
+                s5=0.10, s6=0.18, s7=0.28,
+            )
         return Weights(
             s1=self.s1 / keep,
             s2=self.s2 / keep,
             s3=self.s3 / keep,
             s4=0.0,
             s5=self.s5 / keep,
+            s6=self.s6 / keep,
+            s7=self.s7 / keep,
         )
 
 
@@ -375,10 +460,19 @@ def compatibility(
         target_body_pn = cat.cat_pn.union(*(m.body_pn for m in cat.member_signals))
     s5 = s5_body(file, target_body_pn)
 
+    # S6: file's extension overlap with the category members' exts.
+    target_exts = frozenset(m.ext for m in cat.member_signals if m.ext)
+    s6 = s6_extension(file, target_exts)
+
+    # S7: literal name-prefix overlap.
+    target_stems = [m.raw_stem for m in cat.member_signals if m.raw_stem]
+    s7 = s7_literal_prefix(file, target_stems)
+
     return min(
         1.0,
         max(0.0,
-            w.s1 * s1 + w.s2 * s2 + w.s3 * s3 + w.s4 * s4 + w.s5 * s5,
+            w.s1 * s1 + w.s2 * s2 + w.s3 * s3
+            + w.s4 * s4 + w.s5 * s5 + w.s6 * s6 + w.s7 * s7,
             ),
     )
 
@@ -413,10 +507,18 @@ def pair_compat(a: Signals, b: Signals, *, reclassify_mode: bool = False,
         except Exception:
             s4 = 0.0
     s5 = _jaccard(a.body_pn, b.body_pn)
+    # S6: extension match — pair version of s6_extension.
+    if a.ext and b.ext and a.ext == b.ext:
+        s6 = 0.5 if a.ext in _GENERIC_EXTS else 1.0
+    else:
+        s6 = 0.0
+    # S7: literal prefix overlap.
+    s7 = s7_literal_prefix(a, [b.raw_stem]) if b.raw_stem else 0.0
     return min(
         1.0,
         max(0.0,
-            w.s1 * s1 + w.s2 * s2 + w.s3 * s3 + w.s4 * s4 + w.s5 * s5,
+            w.s1 * s1 + w.s2 * s2 + w.s3 * s3
+            + w.s4 * s4 + w.s5 * s5 + w.s6 * s6 + w.s7 * s7,
             ),
     )
 
@@ -427,7 +529,7 @@ def pair_compat(a: Signals, b: Signals, *, reclassify_mode: bool = False,
 # time-window match (S3 alone scores ≈ 0.095) while still letting a
 # real 의약품 / 행안부 / 한양대 file through (S1 contribution ≈ 0.135
 # brings the total to ≈ 0.23).  See test_compatibility_*.
-THRESHOLD_GUESS_BY_TIME = 0.15
+THRESHOLD_GUESS_BY_TIME = 0.12   # ↓ from 0.15 after S1 weight redistribution
 THRESHOLD_FILENAME_VETO = 0.20
 THRESHOLD_OUTLIER = 0.20
 THRESHOLD_CLUSTER_MERGE = 0.35

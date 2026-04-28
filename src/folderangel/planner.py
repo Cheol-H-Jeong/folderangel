@@ -1093,6 +1093,7 @@ class Planner:
         min_size = int(getattr(self.config, "min_category_size", 3) or 3)
         if min_size >= 2:
             from collections import Counter
+            from pathlib import Path as _Path
             from . import similarity as _sim
             counts = Counter(a["primary"] for a in out_assigns)
             small_ids = {
@@ -1101,33 +1102,60 @@ class Planner:
             }
             if small_ids:
                 cat_by_id = {(c.get("id") or ""): c for c in cum_cats}
-                # Index large categories by their proper-noun set so we
-                # can find the closest match for an absorbed singleton.
-                large_pn: dict[str, frozenset[str]] = {}
-                for cid, n in counts.items():
-                    if n >= min_size and cid != "misc" and cid in cat_by_id:
-                        large_pn[cid] = _sim._proper_nouns(
-                            (cat_by_id[cid].get("name", "") or "")
-                            + " " + (cat_by_id[cid].get("description", "") or "")
-                        )
+                # Group out_assigns by primary so we can build per-category
+                # member Signals for the multi-axis compat score.  Earlier
+                # fix used only proper-noun overlap, which missed
+                # similar-pattern / same-extension cases (the user's
+                # complaint: 강의평가_*.pdf and 발표자료_*.pdf landed in
+                # different singleton folders even though the schema +
+                # extension axes should have pulled them into the larger
+                # bucket).
+                entry_by_path: dict[str, FileEntry] = {
+                    str(e.path): e for e in entries
+                }
+                signals_by_cat: dict[str, list[_sim.Signals]] = {}
+                for a in out_assigns:
+                    pe = entry_by_path.get(str(a["path"]))
+                    if pe is None:
+                        continue
+                    signals_by_cat.setdefault(a["primary"], []).append(
+                        _sim.signals_for_entry(pe)
+                    )
                 redirect: dict[str, str] = {}
                 for sid in small_ids:
                     sc = cat_by_id.get(sid)
                     if sc is None:
                         redirect[sid] = "misc"
                         continue
-                    s_pn = _sim._proper_nouns(
-                        (sc.get("name", "") or "")
-                        + " " + (sc.get("description", "") or "")
-                    )
-                    best = None
-                    best_overlap = 0
-                    for lid, l_pn in large_pn.items():
-                        common = len(s_pn & l_pn)
-                        if common > best_overlap:
-                            best_overlap = common
-                            best = lid
-                    redirect[sid] = best if best else "misc"
+                    sig_list = signals_by_cat.get(sid, [])
+                    if not sig_list:
+                        redirect[sid] = "misc"
+                        continue
+                    # Score this singleton's *member files* against every
+                    # large category — pick the one whose multi-axis compat
+                    # mean is highest.
+                    best_lid: Optional[str] = None
+                    best_score = 0.0
+                    for lid, l_n in counts.items():
+                        if l_n < min_size or lid == "misc" or lid not in cat_by_id:
+                            continue
+                        lcat = _sim.category_signals(
+                            cat_by_id[lid], members=signals_by_cat.get(lid, []),
+                        )
+                        score = sum(
+                            _sim.compatibility(s, lcat, reclassify_mode=anonymise)
+                            for s in sig_list
+                        ) / max(1, len(sig_list))
+                        if score > best_score:
+                            best_score = score
+                            best_lid = lid
+                    # Threshold: if even the best larger category scores
+                    # below 0.20, the singleton genuinely doesn't fit
+                    # anywhere — send its files to misc.
+                    if best_lid and best_score >= 0.20:
+                        redirect[sid] = best_lid
+                    else:
+                        redirect[sid] = "misc"
                 if progress:
                     moved = sum(counts[s] for s in small_ids)
                     progress(
