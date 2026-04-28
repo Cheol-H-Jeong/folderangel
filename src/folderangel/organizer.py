@@ -335,7 +335,12 @@ class Organizer:
         progress: Optional[ProgressCB] = None,
         cancel_check=None,
         excerpts: Optional[dict] = None,
+        skip_paths: Optional[set[str]] = None,
     ) -> OperationResult:
+        # Files in ``skip_paths`` are *not* moved by the organizer —
+        # the pipeline pre-processed them (e.g. duplicate dedup will
+        # delete them after the canonical lands).
+        skip_paths = set(skip_paths or set())
         target_root = Path(target_root).resolve()
         started_at = datetime.now().astimezone()
 
@@ -435,6 +440,10 @@ class Organizer:
             if assign.file_path in seen_paths:
                 continue
             seen_paths.add(assign.file_path)
+            # Pipeline asked us not to touch these (e.g. dedup
+            # duplicates that get deleted after the canonical move).
+            if str(assign.file_path) in skip_paths:
+                continue
             cat_for_msg = next((c for c in plan.categories if c.id == assign.primary_category_id), None)
             cat_label = cat_for_msg.name if cat_for_msg else assign.primary_category_id
             if progress:

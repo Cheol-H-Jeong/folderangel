@@ -155,7 +155,8 @@ def _open_in_explorer(path: Path):
 
 
 class OrganizeView(QtWidgets.QWidget):
-    start_requested = QtCore.Signal(str, bool, bool)  # path, recursive, dry_run
+    # path, recursive, dry_run, mode ("new" | "incremental")
+    start_requested = QtCore.Signal(str, bool, bool, str)
     cancel_requested = QtCore.Signal()
 
     def __init__(self, config: Config, parent=None):
@@ -206,6 +207,37 @@ class OrganizeView(QtWidgets.QWidget):
         opt_row.addWidget(self.chk_recursive)
         opt_row.addWidget(self.chk_dry)
         opt_row.addStretch(1)
+
+        # 분류 모드 카드 — 신규 vs 재분류.  처음 정리할 때 / 추가
+        # 정리할 때를 시작 화면에서 명시적으로 고르게 한다.
+        mode_card = Card()
+        mc = QtWidgets.QHBoxLayout(mode_card)
+        mc.setContentsMargins(18, 14, 18, 14)
+        mc.setSpacing(20)
+        mode_lbl = QtWidgets.QLabel("분류 모드")
+        mode_lbl.setStyleSheet("font-weight:600;")
+        mc.addWidget(mode_lbl)
+        self.rad_new = QtWidgets.QRadioButton("신규 분류")
+        self.rad_new.setToolTip(
+            "기존 하위 폴더를 무시하고 처음부터 폴더 체계를 새로 만듭니다.\n"
+            "처음 정리하는 폴더에 사용하세요."
+        )
+        self.rad_inc = QtWidgets.QRadioButton("재분류 (기존 폴더에 추가)")
+        self.rad_inc.setToolTip(
+            "기존 최상위 폴더를 카테고리 목록으로 사용하고, 새로 들어온\n"
+            "파일만 거기에 분류합니다. 폴더엔젤로 이미 정리한 폴더에\n"
+            "새 파일을 부어 넣고 다시 돌릴 때 사용하세요."
+        )
+        current_mode = (getattr(self.config, "organize_mode", "new") or "new").lower()
+        self.rad_new.setChecked(current_mode != "incremental")
+        self.rad_inc.setChecked(current_mode == "incremental")
+        mode_grp = QtWidgets.QButtonGroup(self)
+        mode_grp.addButton(self.rad_new)
+        mode_grp.addButton(self.rad_inc)
+        mc.addWidget(self.rad_new)
+        mc.addWidget(self.rad_inc)
+        mc.addStretch(1)
+        outer.addWidget(mode_card)
 
         self.badge_api = QtWidgets.QLabel("API 키 확인 중…")
         self.badge_api.setObjectName("Badge")
@@ -321,7 +353,11 @@ class OrganizeView(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "폴더 아님", "선택한 경로가 폴더가 아닙니다.")
             return
         self.set_running(True)
-        self.start_requested.emit(path, self.chk_recursive.isChecked(), self.chk_dry.isChecked())
+        mode = "incremental" if self.rad_inc.isChecked() else "new"
+        self.start_requested.emit(
+            path, self.chk_recursive.isChecked(),
+            self.chk_dry.isChecked(), mode,
+        )
 
     def set_running(self, running: bool):
         self.btn_primary.setDisabled(running)
@@ -897,14 +933,22 @@ class SettingsView(QtWidgets.QWidget):
         c3_title = QtWidgets.QLabel("분류 동작")
         c3_title.setStyleSheet("font-size:16px;font-weight:600;")
         c3.addWidget(c3_title)
-        self.chk_reclassify = QtWidgets.QCheckBox(
-            "재분류 모드 — 기존 폴더명을 무시하고 파일명·본문만으로 분류"
-        )
-        self.chk_reclassify.setChecked(bool(getattr(self.config, "reclassify_mode", False)))
-        c3.addWidget(self.chk_reclassify)
+
+        # 신규 / 재분류 모드는 *시작 화면*에서 매번 선택합니다 — 여기엔
+        # 보조 옵션(중복 파일 dedup 임계값)만 둡니다.
+        f3 = QtWidgets.QFormLayout()
+        f3.setSpacing(8)
+        self.spin_dedup_mb = QtWidgets.QSpinBox()
+        self.spin_dedup_mb.setRange(0, 4096)
+        self.spin_dedup_mb.setSuffix(" MB")
+        cur_mb = max(0, int(getattr(self.config, "dedup_min_bytes", 1_048_576) // (1 << 20)))
+        self.spin_dedup_mb.setValue(cur_mb)
+        f3.addRow("중복 파일 자동 삭제 (이 크기 이상)", self.spin_dedup_mb)
+        c3.addLayout(f3)
         c3_hint = QtWidgets.QLabel(
-            "한번 잘못 정리된 폴더를 다시 분류할 때만 켜세요. "
-            "보통은 LLM이 기존 폴더명을 단서로 삼는 편이 더 정확합니다."
+            "동일 내용 파일이 여러 곳에 있으면 가장 짧은 경로에 1개만 분류하고 "
+            "나머지는 삭제해 용량을 회수합니다.  0 = 모든 크기 dedup, "
+            "큰 값일수록 보수적."
         )
         c3_hint.setWordWrap(True)
         c3_hint.setStyleSheet("color:#6e6e73;font-size:12px;")
@@ -1239,7 +1283,10 @@ class SettingsView(QtWidgets.QWidget):
         # economy_max_files is kept as a soft cap; the planner now uses
         # the model's real context window when available.
         self.config.economy_max_files = max(self.config.economy_max_files or 120, 60)
-        self.config.reclassify_mode = bool(self.chk_reclassify.isChecked())
+        # organize_mode is set on the start-screen radio (per-run), not
+        # here.  Keep the legacy reclassify_mode bool aligned with the
+        # latest run so old code paths don't desync.
+        self.config.dedup_min_bytes = int(self.spin_dedup_mb.value()) * (1 << 20)
         self.config.appearance = self.cmb_appearance.currentText()
         # Reasoning mode is decided automatically from the model name in
         # OpenAICompatClient — no user knob.  Keep the saved value at

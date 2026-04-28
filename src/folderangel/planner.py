@@ -461,6 +461,7 @@ class Planner:
         config: Config,
         gemini: Optional[Any] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        seed_categories: Optional[list[dict]] = None,
     ) -> None:
         # ``gemini`` is named that way for backwards compatibility, but it
         # accepts any object exposing ``generate_json(prompt, *,
@@ -469,6 +470,11 @@ class Planner:
         self.config = config
         self.gemini = gemini
         self.cancel_check = cancel_check
+        # Pre-seeded categories for the *재분류 (incremental)* mode —
+        # the rolling planner starts with these as ``categories_so_far``
+        # so the LLM places new files into existing folders instead of
+        # inventing parallel ones.
+        self.seed_categories: list[dict] = list(seed_categories or [])
 
     def _llm_call(
         self,
@@ -911,9 +917,14 @@ class Planner:
 
         # Initial chunk size assumes a small (10-cat) catalogue; later
         # chunks recompute based on the actual cumulative catalogue.
-        cum_cats: list[dict] = []
+        # Pre-seed from the existing top-level folders if the caller
+        # set ``seed_categories`` (incremental mode).
+        cum_cats: list[dict] = list(self.seed_categories or [])
         cum_assigns: list[dict] = []   # raw {"i":fid, "c":cid, "p":..., "r":...}
-        seen_cat_ids: set[str] = set()
+        seen_cat_ids: set[str] = {
+            (c.get("id") or "").strip() for c in cum_cats if isinstance(c, dict)
+        }
+        seen_cat_ids.discard("")
 
         idx = 0
         total_rows = len(rows)

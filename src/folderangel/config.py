@@ -218,13 +218,30 @@ class Config:
     ignore_patterns: list[str] = field(
         default_factory=lambda: [".*", "~$*", "Thumbs.db", ".DS_Store", "desktop.ini"]
     )
-    # When True, parent folder names are anonymised in every path the
-    # LLM sees ("[folder]" placeholder).  Use this to RE-classify a
-    # corpus that was previously organised badly — without it, the LLM
-    # tends to defer to the existing folder names and the wrong groups
-    # stay wrong.  Default off because the realistic case is "respect
-    # whatever the user already curated".
+    # *Deprecated* — kept only for backwards compatibility while old
+    # config files load.  The active control is now ``organize_mode``.
     reclassify_mode: bool = False
+
+    # User-facing organize mode chosen on the start screen:
+    #   "new"          신규 분류 — ignore every existing sub-folder,
+    #                 build the category catalogue from scratch.  Use
+    #                 the very first time the user organises a folder.
+    #   "incremental"  재분류 — keep the existing top-level folders as
+    #                 the canonical category list and only place new
+    #                 / unsorted files into them, appending a brand-new
+    #                 category only when no existing folder fits.  Use
+    #                 every subsequent time the user pours new files
+    #                 into a folder that FolderAngel has organised
+    #                 before.
+    organize_mode: str = "new"
+
+    # Duplicate-file dedup threshold (bytes).  When ≥ 2 files share
+    # the same content (size + hash), all but one are *deleted* after
+    # the canonical copy is placed — but only if each duplicate is at
+    # least this many bytes.  Setting it to 0 deduplicates every
+    # duplicate regardless of size; raising it (e.g. 10 MB) limits
+    # dedup to the files that actually save space.
+    dedup_min_bytes: int = 1_048_576   # 1 MB — covers media, archives, big PDFs
 
     def to_dict(self) -> dict:
         return asdict(self)

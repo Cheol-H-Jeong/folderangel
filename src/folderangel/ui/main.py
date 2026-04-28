@@ -135,9 +135,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_status_badge()
 
     # ------------------------------------------------------------------
-    def _start(self, path: str, recursive: bool, dry_run: bool):
+    def _start(self, path: str, recursive: bool, dry_run: bool, mode: str = "new"):
         if self._thread is not None:
             return
+        # Persist the chosen mode onto the live config so the pipeline
+        # picks it up.  ``incremental`` reuses existing top-level
+        # folders as the category catalogue; ``new`` ignores them and
+        # builds the catalogue from scratch.
+        self.config.organize_mode = mode if mode in ("new", "incremental") else "new"
         # Open a fresh per-run log file so every Organize run is captured
         # with full INFO/DEBUG and tracebacks.
         from ..runlog import start_session

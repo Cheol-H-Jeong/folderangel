@@ -200,6 +200,11 @@ class OperationResult:
     operation_id: Optional[int] = None
     llm_usage: Optional[LLMUsage] = None
     report_path: Optional[Path] = None
+    # Duplicates removed during this run: list of (deleted_path,
+    # canonical_path, bytes_freed) — surfaced in the report so the
+    # user knows what disappeared and why.
+    dupes_removed: list = field(default_factory=list)
+    bytes_freed: int = 0
 
     @property
     def total_moved(self) -> int:

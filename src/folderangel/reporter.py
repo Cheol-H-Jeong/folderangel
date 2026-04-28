@@ -26,6 +26,11 @@ def _build(op: OperationResult) -> str:
     lines.append(f"- 소요: {dur:.1f} 초")
     lines.append(f"- 모드: {'Dry-Run (변경 없음)' if op.dry_run else '실행'}")
     lines.append(f"- 스캔: {op.total_scanned}개 / 이동: {op.total_moved}개 / 바로가기: {op.total_shortcuts}개 / 스킵: {op.total_skipped}개")
+    if getattr(op, "dupes_removed", None):
+        mb = (op.bytes_freed or 0) / (1 << 20)
+        lines.append(
+            f"- 중복 삭제: {len(op.dupes_removed)}개 파일 / ≈ {mb:.1f} MB 회수"
+        )
     if op.operation_id is not None:
         lines.append(f"- 오퍼레이션 ID: {op.operation_id}")
     if op.llm_usage is not None:

@@ -122,6 +122,65 @@ def run(
     entries = gather_entries(target_root, config, recursive, progress, cancel_check)
     _check()
 
+    # ------------------------------------------------------------------
+    # Mode resolution.  ``organize_mode`` was added when we split the
+    # legacy ``reclassify_mode`` boolean into a 3-state choice on the
+    # start screen.  Old configs may only have ``reclassify_mode``;
+    # treat that as the new "신규 분류" mode.
+    # ------------------------------------------------------------------
+    mode = (getattr(config, "organize_mode", "") or "").lower()
+    if mode not in ("new", "incremental"):
+        mode = "new" if getattr(config, "reclassify_mode", False) else "new"
+    # Both modes anonymise sub-folder paths in the prompt — the LLM
+    # decides categories from filename + content + (in incremental
+    # mode) the seed catalogue, never from broken or already-classified
+    # parent folder names.
+    config.reclassify_mode = True
+
+    # Incremental mode pre-seeds the rolling planner's catalogue from
+    # the existing top-level sub-folders of ``target_root``.  This
+    # forces the LLM to *re-use* those folders for new files instead
+    # of inventing parallel categories.
+    seed_categories: list[dict] = []
+    if mode == "incremental":
+        seed_categories = _seed_categories_from_disk(target_root)
+        if progress:
+            progress(
+                f"plan: 재분류 모드 — 기존 폴더 {len(seed_categories)}개를 카테고리로 활용",
+                0.06,
+            )
+
+    # ------------------------------------------------------------------
+    # Duplicate detection: skip the LLM round-trip for non-canonical
+    # copies of the same file and queue them for deletion after the
+    # canonical is placed.
+    # ------------------------------------------------------------------
+    dedup_groups = []
+    canonical_only = entries
+    if not dry_run and getattr(config, "dedup_min_bytes", 0) >= 0:
+        from . import dedup as _dedup
+        dedup_groups = _dedup.find_duplicate_groups(
+            entries, min_bytes=int(getattr(config, "dedup_min_bytes", 1_048_576) or 0)
+        )
+        if dedup_groups:
+            n_dupes = sum(len(g.duplicates) for g in dedup_groups)
+            mb_save = sum(g.total_bytes_freed for g in dedup_groups) / (1 << 20)
+            if progress:
+                progress(
+                    f"dedup: 중복 파일 {n_dupes}개 발견 → 분류는 1개만 / "
+                    f"≈ {mb_save:.1f} MB 정리 예정",
+                    0.07,
+                )
+            duplicate_paths = {
+                str(d.path) for g in dedup_groups for d in g.duplicates
+            }
+            canonical_only = [
+                e for e in entries if str(e.path) not in duplicate_paths
+            ]
+        else:
+            if progress:
+                progress("dedup: 중복 파일 없음", 0.07)
+
     client = None
     if not force_mock:
         key = get_api_key(config, provider=config.llm_provider)
@@ -141,19 +200,64 @@ def run(
             )
         else:
             progress("plan: Mock 휴리스틱 모드", 0.0)
-    planner = Planner(config, gemini=client, cancel_check=cancel_check)
-    plan: Plan = planner.plan(entries, progress=progress)
+    planner = Planner(
+        config, gemini=client, cancel_check=cancel_check,
+        seed_categories=seed_categories,
+    )
+    plan: Plan = planner.plan(canonical_only, progress=progress)
     _check()
+
+    # Add the duplicates back to the plan, each pointing at the same
+    # category as its canonical.  The organizer will skip the actual
+    # file move (we'll delete them after) but the report shows them.
+    if dedup_groups:
+        canon_cat: dict[str, str] = {
+            str(a.file_path): a.primary_category_id for a in plan.assignments
+        }
+        from .models import Assignment, SecondaryAssignment
+        for g in dedup_groups:
+            cid = canon_cat.get(str(g.canonical.path))
+            if not cid:
+                continue
+            for d in g.duplicates:
+                plan.assignments.append(Assignment(
+                    file_path=d.path,
+                    primary_category_id=cid,
+                    primary_score=1.0,
+                    secondary=[],
+                    reason=f"중복 — 정본: {Path(g.canonical.path).name}",
+                ))
 
     if progress:
         progress(f"plan: 카테고리 {len(plan.categories)}개 결정됨", 0.95)
         progress(f"organize: 파일 이동 시작 ({len(plan.assignments)}개)", 0.0)
     organizer = Organizer(config)
     excerpts_map = {str(e.path): (e.content_excerpt or "") for e in entries}
+    duplicate_paths = (
+        {str(d.path) for g in dedup_groups for d in g.duplicates}
+        if dedup_groups else set()
+    )
     op = organizer.execute(
         target_root, plan, dry_run=dry_run, progress=progress,
         cancel_check=cancel_check, excerpts=excerpts_map,
+        skip_paths=duplicate_paths,
     )
+
+    # ------------------------------------------------------------------
+    # After the canonical files are in their final folders, delete the
+    # duplicates that no longer earn their disk space.
+    # ------------------------------------------------------------------
+    if dedup_groups and not dry_run:
+        from . import dedup as _dedup
+        actions = _dedup.remove_duplicate_files(dedup_groups, dry_run=False)
+        op.dupes_removed = [(str(d), str(c), b) for d, c, b in actions]
+        op.bytes_freed = sum(b for _d, _c, b in actions)
+        if progress:
+            mb = op.bytes_freed / (1 << 20)
+            progress(
+                f"dedup: 중복 파일 {len(actions)}개 삭제 완료 — {mb:.1f} MB 회수",
+                0.98,
+            )
 
     if client is not None:
         op.llm_usage = LLMUsage(
@@ -180,5 +284,49 @@ def run(
             index_db.record_operation(op)
         except Exception as exc:
             log.warning("index record failed: %s", exc)
+
+    return op
+
+
+def _seed_categories_from_disk(target_root: Path) -> list[dict]:
+    """Build a seed catalogue from the existing top-level folders of
+    ``target_root`` — used by the *재분류 (incremental)* mode so the
+    LLM places new files into folders the user already approved
+    instead of inventing parallel categories.
+
+    Naming convention recognised: "{n}. {name} 〈{period}〉" or
+    "{n}. {name} ({period})" or just plain "{name}".  We strip the
+    leading "{n}." sort prefix to keep the LLM-facing id stable.
+    """
+    import re
+    if not target_root.is_dir():
+        return []
+    seeds: list[dict] = []
+    for entry in sorted(target_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(".") or entry.name.startswith("__"):
+            continue
+        raw = entry.name
+        # Strip "1. " / "2-" / "3) " sort prefixes.
+        core = re.sub(r"^\s*\d+[\.\-_)\]\s]+", "", raw).strip()
+        # Pull out a trailing 〈2025-2026〉 / (2024) period if present.
+        m = re.search(r"[〈(]([^〉)]{1,30})[〉)]\s*$", core)
+        time_label = m.group(1).strip() if m else ""
+        if m:
+            core = core[:m.start()].strip()
+        slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", core).strip("-").lower()[:40]
+        if not slug:
+            slug = f"existing-{len(seeds)+1}"
+        seeds.append({
+            "id": slug,
+            "name": core or raw,
+            "description": f"기존 폴더: {raw}",
+            "time_label": time_label,
+            "duration": "mixed",
+            "group": (len(seeds) % 8) + 1,
+            "_existing_folder": str(entry),  # informational
+        })
+    return seeds
 
     return op
