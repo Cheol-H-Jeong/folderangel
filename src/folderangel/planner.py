@@ -670,9 +670,13 @@ class Planner:
 
         if _rolling is not None and _rolling.should_use_rolling(self.config, len(entries)):
             try:
+                # Compute capacity / ctx once and reuse — avoids the
+                # ctx probe firing 4× per run (used to make 4 sequential
+                # 2-second timeouts when the cloud /v1/models endpoint
+                # answered 403).
+                eff = _rolling.estimate_effective_ctx(self.config)
+                cap = _rolling.compute_chunk_size(eff, n_categories_estimate=10)
                 if progress:
-                    cap = _rolling.estimate_files_capacity(self.config)
-                    eff = _rolling.estimate_effective_ctx(self.config)
                     n_chunks = max(1, (len(entries) + cap - 1) // max(1, cap))
                     extra = " + consolidation 1콜" if n_chunks >= 2 else ""
                     progress(
@@ -683,7 +687,13 @@ class Planner:
                 plan_dict = self._rolling_plan(entries, payloads, progress)
                 return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
             except Exception as exc:
-                log.warning("rolling plan failed; falling through: %s", exc)
+                log.exception("rolling plan failed; falling through")
+                if progress:
+                    progress(
+                        f"⚠ rolling 플래너 실패 — fallback 으로 전환: "
+                        f"{type(exc).__name__}: {str(exc)[:200]}",
+                        -1.0,
+                    )
 
         # ------------------------------------------------------------------
         # Local LLM (small-context) micro-batch path.  When the provider is
@@ -822,8 +832,23 @@ class Planner:
         from . import rolling as _rolling
 
         anonymise = bool(getattr(self.config, "reclassify_mode", False))
+        if progress:
+            progress(
+                f"plan: rolling — 시그니처 그루핑 중 ({len(entries)} 파일)",
+                0.19,
+            )
         rows = _rolling.build_rows(entries, reclassify_mode=anonymise)
         eff_ctx = _rolling.estimate_effective_ctx(self.config)
+        if progress:
+            collapsed = len(entries) - len(rows)
+            collapse_msg = (
+                f" — 중복 시그니처 {collapsed}개 collapse 됨"
+                if collapsed > 0 else ""
+            )
+            progress(
+                f"plan: rolling — {len(rows)} 시그니처 행 준비 완료{collapse_msg}",
+                0.20,
+            )
 
         # Initial chunk size assumes a small (10-cat) catalogue; later
         # chunks recompute based on the actual cumulative catalogue.
@@ -835,6 +860,13 @@ class Planner:
         total_rows = len(rows)
         while idx < total_rows:
             chunk_size = _rolling.compute_chunk_size(eff_ctx, len(cum_cats))
+            # Hard floor: never let the loop step by 0 (would infinite-loop)
+            # and never let it shrink below MIN even if the catalogue grew
+            # so large that the budget calc says "no room".  In that
+            # pathological case we just send a small chunk and trust the
+            # LLM to truncate gracefully.
+            if chunk_size <= 0:
+                chunk_size = _rolling.MIN_CHUNK_FILES
             chunk = rows[idx : idx + chunk_size]
             chunk_payload = [_rolling.row_to_payload(r) for r in chunk]
             prompt = _rolling.build_rolling_prompt(
@@ -862,6 +894,12 @@ class Planner:
                 )
             except LLMError as exc:
                 log.warning("rolling chunk %d failed: %s", chunk_no, exc)
+                if progress:
+                    progress(
+                        f"⚠ rolling [{chunk_no}/{n_chunks_est}] LLM 호출 실패 — "
+                        f"{type(exc).__name__}: {str(exc)[:200]}",
+                        -1.0,
+                    )
                 # Mark every file in this chunk as misc — the
                 # ``_plan_from_dict`` rescue will try to recover them.
                 for r in chunk:
@@ -869,6 +907,18 @@ class Planner:
                                          "p": 0.3, "r": "rolling 호출 실패"})
                 idx += len(chunk)
                 continue
+            except Exception as exc:
+                # Non-LLMError exceptions (network, parser bugs, ctx
+                # probe rabbit-holes) — bubble up with a visible UI
+                # message instead of silently abandoning the run.
+                log.exception("rolling chunk %d crashed", chunk_no)
+                if progress:
+                    progress(
+                        f"⚠ rolling [{chunk_no}/{n_chunks_est}] 예외: "
+                        f"{type(exc).__name__}: {str(exc)[:200]}",
+                        -1.0,
+                    )
+                raise
 
             for c in (resp.get("new_categories") or []):
                 cid = (c.get("id") or "").strip()

@@ -35,6 +35,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -176,42 +177,67 @@ def _model_family(model_id: str) -> str:
     return "default"
 
 
+@lru_cache(maxsize=64)
+def _probe_openai_compat_ctx(base_url: str, model: str) -> Optional[int]:
+    """Hit ``/v1/models`` to read ``context_length``.  Cached per
+    (base_url, model) so a single planning run only ever probes once.
+
+    Returns ``None`` if the endpoint is auth-gated (cloud providers
+    like Google's Gemini-via-OpenAI proxy return 403 without an API
+    key in the URL or header) or the response is unparseable.
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{base_url}/models", timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for entry in data.get("data") or []:
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("id") or "").lower().startswith(model.lower()):
+                for key in ("context_length", "max_context_length",
+                            "n_ctx", "context_window"):
+                    v = entry.get(key)
+                    if isinstance(v, int) and v > 0:
+                        return v
+        return None
+    except Exception as exc:
+        log.debug("ctx probe failed: %s", exc)
+        return None
+
+
 def estimate_effective_ctx(cfg: Config) -> int:
     """Effective context window in tokens, accounting for accuracy
     degradation past the model's reasonable comprehension range.
 
-    Probes the OpenAI-compat ``/v1/models`` endpoint when available;
-    otherwise falls back to the advertised-ctx table; otherwise to
-    ``Config.assumed_ctx_tokens``.
+    For *known* model families (Gemini / Claude / GPT / Qwen — anything
+    in :data:`ADVERTISED_CTX`) we trust the table and skip the live
+    probe.  Probing a cloud-hosted OpenAI-compat proxy without an auth
+    header burns time and emits 403 noise into the log; the table is
+    accurate enough.
+
+    Only when the model family is *unknown* AND the ``base_url``
+    smells like a local server (``/v1`` path) do we hit ``/v1/models``.
     """
-    family = _model_family(getattr(cfg, "model", ""))
+    model = (getattr(cfg, "model", "") or "")
+    family = _model_family(model)
     ratio = EFFECTIVE_CTX_RATIO.get(family, EFFECTIVE_CTX_RATIO["default"])
     advertised = ADVERTISED_CTX.get(family) or int(getattr(cfg, "assumed_ctx_tokens", 8192))
 
-    # Best-effort live probe for openai-compat — many local servers
-    # report n_ctx via /v1/models.
-    probed: Optional[int] = None
-    base_url = (getattr(cfg, "llm_base_url", "") or "").rstrip("/")
-    if base_url and "/v1" in base_url:
-        try:
-            import urllib.request
-            with urllib.request.urlopen(f"{base_url}/models", timeout=2.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            for entry in data.get("data") or []:
-                if not isinstance(entry, dict):
-                    continue
-                if (entry.get("id") or "").lower().startswith(getattr(cfg, "model", "").lower()):
-                    for key in ("context_length", "max_context_length", "n_ctx", "context_window"):
-                        v = entry.get(key)
-                        if isinstance(v, int) and v > 0:
-                            probed = v
-                            break
-                    if probed:
-                        break
-        except Exception as exc:
-            log.debug("ctx probe failed: %s", exc)
+    raw_ctx: int = advertised
+    if family == "default":
+        base_url = (getattr(cfg, "llm_base_url", "") or "").rstrip("/")
+        # Only probe if the URL looks like a local server — Ollama /
+        # LM Studio / vLLM live at 127.0.0.1 or localhost and don't
+        # require auth on /v1/models.  Cloud proxies (Google, Together,
+        # Groq) return 403 without an API key, which is just noise.
+        if base_url and "/v1" in base_url and (
+            "127.0.0.1" in base_url or "localhost" in base_url
+            or "0.0.0.0" in base_url
+        ):
+            probed = _probe_openai_compat_ctx(base_url, model)
+            if probed is not None:
+                raw_ctx = probed
 
-    raw_ctx = probed or advertised
     return max(2_048, int(raw_ctx * ratio))
 
 
