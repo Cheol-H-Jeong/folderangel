@@ -38,9 +38,72 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
-from .cluster import signature
 from .config import Config
 from .models import FileEntry
+
+
+# ----- filename signature ------------------------------------------------
+#
+# Stable hashable key that collapses members of the same document
+# family (versions / dates / sequence numbers).  Pulls project /
+# agency / system nouns out of the filename via :mod:`folderangel.morph`
+# (kiwi-based with a regex fallback) and uses up to ``_SIG_PREFIX_LEN``
+# of them as the key.  Migrated here from the old ``cluster`` module
+# whose hierarchical-clustering code was retired in favour of the
+# rolling planner.
+# -------------------------------------------------------------------------
+
+_BOUND = r"(?<![A-Za-z0-9])"
+_BOUND_END = r"(?![A-Za-z0-9])"
+_VERSION_RE = re.compile(
+    rf"{_BOUND}(?:v|ver|version|rev|revision|draft|fin|final|"
+    rf"r|R|최종|확정|초안|수정|\d?차)\s*[._-]?\s*\d+(?:[._.\-]\d+)*{_BOUND_END}",
+    re.IGNORECASE,
+)
+_DATE_RE = re.compile(
+    rf"(?:"
+    rf"{_BOUND}\d{{4}}[-_/.]?\d{{2}}[-_/.]?\d{{2}}{_BOUND_END}"
+    rf"|{_BOUND}\d{{2}}\d{{2}}\d{{2}}{_BOUND_END}"
+    rf"|{_BOUND}\d{{4}}[-_/.]?\d{{2}}{_BOUND_END}"
+    rf"|{_BOUND}\d{{2}}[-_/.]?\d{{2}}[-_/.]?\d{{2}}{_BOUND_END}"
+    rf")"
+)
+_SEQ_RE = re.compile(r"\((\s*\d+\s*)\)|_\d{1,3}$|copy(?:\s*of)?", re.IGNORECASE)
+_DECORATION_RE = re.compile(r"^(?:★|※|◎|◆|■|●|○|▶|▷)+\s*")
+_PARENS_RE = re.compile(r"\([^()]{1,16}\)")
+_NOISE_TOKENS = {
+    "복사본", "복사", "사본", "copy", "of", "수정본", "변경본",
+    "최종본", "최종판", "최종", "확정본", "발표용", "작성요청",
+    "임시", "원본", "공유용", "draft", "final", "fin",
+}
+_SIG_PREFIX_LEN = 2
+
+
+def signature(name: str, body_excerpt: str = "") -> str:
+    """Stable signature key — see module docstring for the rules."""
+    from . import morph
+
+    head = _DECORATION_RE.sub("", name or "")
+    head = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", head)
+    head = _PARENS_RE.sub(" ", head)
+    head = _DATE_RE.sub(" ", head)
+    head = _VERSION_RE.sub(" ", head)
+    head = _SEQ_RE.sub(" ", head)
+
+    nouns = morph.extract_nouns(head)
+    nouns = [n for n in nouns if n not in _NOISE_TOKENS]
+    if len(nouns) < _SIG_PREFIX_LEN and body_excerpt:
+        body_nouns = morph.extract_nouns(body_excerpt[:1000], top_k=8)
+        body_nouns = [n for n in body_nouns if n not in _NOISE_TOKENS]
+        for n in body_nouns:
+            if n in nouns:
+                continue
+            nouns.append(n)
+            if len(nouns) >= _SIG_PREFIX_LEN:
+                break
+    if not nouns:
+        return ""
+    return " ".join(nouns[:_SIG_PREFIX_LEN])
 
 log = logging.getLogger(__name__)
 
