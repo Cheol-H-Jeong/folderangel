@@ -45,6 +45,14 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".ini",
     ".cfg",
     ".toml",
+    # Archives — listed for member-name extraction (no decompression).
+    ".zip",
+    ".jar",
+    ".war",
+    ".tar",
+    ".tgz",
+    ".tbz",
+    ".txz",
 }
 
 
@@ -107,4 +115,9 @@ def extract_excerpt(path: Path, max_chars: int = 1800, timeout: float = 5.0) -> 
         return _safe(text_parser.parse_plain, path, max_chars, timeout)
     if ext in {".html", ".htm"}:
         return _safe(text_parser.parse_html, path, max_chars, timeout)
+    # Archive containers: list member names so the classifier can use
+    # them as a synthetic "body".  See :mod:`folderangel.parsers.archive`.
+    from . import archive as archive_parser
+    if archive_parser.is_archive(path):
+        return _safe(archive_parser.parse, path, max_chars, timeout)
     return ""

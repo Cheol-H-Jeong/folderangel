@@ -199,6 +199,7 @@ class OperationResult:
     total_scanned: int
     operation_id: Optional[int] = None
     llm_usage: Optional[LLMUsage] = None
+    report_path: Optional[Path] = None
 
     @property
     def total_moved(self) -> int:

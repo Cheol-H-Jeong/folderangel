@@ -1,9 +1,9 @@
-"""SQLite index + FTS5 search + simple rollback."""
+"""SQLite index + FTS5 search."""
 from __future__ import annotations
 
 import json
 import logging
-import shutil
+
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,12 +36,7 @@ class OperationInfo:
     finished_at: str
     dry_run: bool
     moved_count: int
-
-
-@dataclass
-class RollbackResult:
-    restored: int
-    failed: list[str]
+    report_path: str = ""
 
 
 _SCHEMA = """
@@ -216,10 +211,46 @@ class IndexDB:
             "total_shortcuts": op.total_shortcuts,
             "categories": [c.__dict__ for c in op.categories],
         }
+        # Persist the report path (set by the pipeline right before this
+        # call) so history-tab double-click can open it without globbing.
+        if getattr(op, "report_path", None):
+            stats["report_path"] = str(op.report_path)
         # id → human-readable category name, used to keep ``files.category_name``
         # in sync with what's shown to the user.
         cat_name_by_id = {c.id: c.name for c in op.categories}
         cur = self.conn.cursor()
+        # ----- de-dup the search index --------------------------------
+        # Every file in this operation has been moved, so any prior row
+        # whose ``new_path`` matches either the OLD or NEW location of
+        # one of these files is now obsolete: same file, indexed under a
+        # path that either no longer holds it (old location) or is about
+        # to be re-inserted (new location).  Without this purge,
+        # search results listed the same file twice and double-clicking
+        # the stale row opened a broken link.
+        if op.moved:
+            stale_paths = {str(mf.original_path) for mf in op.moved} | {
+                str(mf.new_path) for mf in op.moved
+            }
+            placeholders = ",".join("?" for _ in stale_paths)
+            cur.execute(
+                f"DELETE FROM files WHERE new_path IN ({placeholders})",
+                tuple(stale_paths),
+            )
+        # Also sweep any orphaned rows whose recorded ``new_path`` no
+        # longer exists on disk — these are leftovers from earlier runs
+        # whose files have been deleted, renamed, or moved by the user.
+        # We cap the scan at 5000 rows per operation to keep this cheap;
+        # full housekeeping can be done via reindex.
+        try:
+            for r in cur.execute(
+                "SELECT id, new_path FROM files ORDER BY id DESC LIMIT 5000"
+            ).fetchall():
+                p = r["new_path"]
+                if p and not Path(p).exists():
+                    cur.execute("DELETE FROM files WHERE id = ?", (r["id"],))
+        except Exception as exc:
+            log.debug("orphan sweep skipped: %s", exc)
+
         cur.execute(
             "INSERT INTO operations(target_root, started_at, finished_at, dry_run, stats_json) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -414,6 +445,7 @@ class IndexDB:
         rows = self.conn.execute(
             """
             SELECT o.id, o.target_root, o.started_at, o.finished_at, o.dry_run,
+                   o.stats_json,
                    (SELECT COUNT(*) FROM files WHERE op_id = o.id) AS n
             FROM operations o
             ORDER BY o.id DESC
@@ -421,113 +453,30 @@ class IndexDB:
             """,
             (limit,),
         ).fetchall()
-        return [
-            OperationInfo(
+        out: list[OperationInfo] = []
+        for r in rows:
+            report_path = ""
+            try:
+                stats = json.loads(r["stats_json"] or "{}")
+                report_path = str(stats.get("report_path") or "")
+            except Exception:
+                report_path = ""
+            out.append(OperationInfo(
                 op_id=r["id"],
                 target_root=r["target_root"],
                 started_at=r["started_at"],
                 finished_at=r["finished_at"],
                 dry_run=bool(r["dry_run"]),
                 moved_count=r["n"],
-            )
-            for r in rows
-        ]
+                report_path=report_path,
+            ))
+        return out
 
     def latest_operation_id(self) -> Optional[int]:
         row = self.conn.execute(
             "SELECT id FROM operations ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return row["id"] if row else None
-
-    def rollback(
-        self,
-        op_id: int,
-        *,
-        force: bool = False,
-    ) -> RollbackResult:
-        """Restore the files moved during operation ``op_id``.
-
-        Safety policy:
-          * Rolling back the **most recent** operation is always
-            allowed.  The on-disk state is the closest to what we
-            recorded, so the move-back is well-defined.
-          * Rolling back **any older** operation is dangerous: the
-            user (or a later FolderAngel op) may have re-organised the
-            same files in between, so naively moving them back can
-            overwrite newer work.  We refuse unless ``force=True`` is
-            passed.
-          * Even with ``force=True`` we still skip individual files
-            whose recorded ``new_path`` no longer exists at that exact
-            location (someone moved them elsewhere) or whose recorded
-            ``original_path`` is now occupied by a different file —
-            those collisions are reported in ``failed`` and not
-            overwritten.
-        """
-        latest = self.latest_operation_id()
-        is_latest = (latest is not None and op_id == latest)
-        if not is_latest and not force:
-            return RollbackResult(
-                restored=0,
-                failed=[
-                    f"op_id {op_id} is not the most recent operation "
-                    f"(latest is {latest}); pass force=True to attempt "
-                    "a guarded rollback of an older operation",
-                ],
-            )
-
-        rows = self.conn.execute(
-            "SELECT id, original_path, new_path FROM files WHERE op_id = ?",
-            (op_id,),
-        ).fetchall()
-        shortcuts = self.conn.execute(
-            "SELECT shortcut_path FROM shortcuts WHERE op_id = ?", (op_id,)
-        ).fetchall()
-
-        restored = 0
-        failed: list[str] = []
-        # remove shortcuts first — these are derived state, safe either way.
-        for s in shortcuts:
-            sp = Path(s["shortcut_path"])
-            try:
-                if sp.exists() or sp.is_symlink():
-                    sp.unlink()
-            except Exception as exc:
-                failed.append(f"{sp}: {exc}")
-
-        touched_folders: set[Path] = set()
-        for r in rows:
-            orig = Path(r["original_path"])
-            new = Path(r["new_path"])
-            try:
-                if not new.exists():
-                    failed.append(f"{new}: missing (file moved or deleted since op)")
-                    continue
-                if orig.exists() and orig.resolve() != new.resolve():
-                    # Collision at the original location — refuse to
-                    # overwrite a newer file, even with force.
-                    failed.append(
-                        f"{orig}: target already occupied by a different file; "
-                        "refusing to overwrite"
-                    )
-                    continue
-                orig.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(new), str(orig))
-                restored += 1
-                touched_folders.add(new.parent)
-            except Exception as exc:
-                failed.append(f"{new}: {exc}")
-
-        # Best-effort cleanup: remove any category folders that are now empty.
-        for folder in sorted(touched_folders, key=lambda p: len(p.parts), reverse=True):
-            try:
-                if folder.is_dir() and not any(folder.iterdir()):
-                    folder.rmdir()
-            except Exception as exc:
-                log.debug("rmdir skipped %s: %s", folder, exc)
-
-        self.conn.execute("DELETE FROM operations WHERE id = ?", (op_id,))
-        self.conn.commit()
-        return RollbackResult(restored=restored, failed=failed)
 
     def close(self) -> None:
         try:

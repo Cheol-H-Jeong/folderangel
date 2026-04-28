@@ -157,7 +157,6 @@ def _open_in_explorer(path: Path):
 class OrganizeView(QtWidgets.QWidget):
     start_requested = QtCore.Signal(str, bool, bool)  # path, recursive, dry_run
     cancel_requested = QtCore.Signal()
-    rollback_requested = QtCore.Signal(int)
 
     def __init__(self, config: Config, parent=None):
         super().__init__(parent)
@@ -278,12 +277,8 @@ class OrganizeView(QtWidgets.QWidget):
         self.btn_open_report = QtWidgets.QPushButton("리포트 열기")
         self.btn_open_report.setObjectName("Ghost")
         self.btn_open_report.clicked.connect(self._open_report)
-        self.btn_rollback = QtWidgets.QPushButton("되돌리기")
-        self.btn_rollback.setObjectName("Warning")
-        self.btn_rollback.clicked.connect(self._emit_rollback)
         top.addWidget(self.btn_open_folder)
         top.addWidget(self.btn_open_report)
-        top.addWidget(self.btn_rollback)
         rc.addLayout(top)
 
         self.stats_row = StatsRow()
@@ -490,11 +485,6 @@ class OrganizeView(QtWidgets.QWidget):
             self.cat_table.setItem(row, 1, QtWidgets.QTableWidgetItem(cat.name))
             self.cat_table.setItem(row, 2, QtWidgets.QTableWidgetItem(str(counter.get(cat.id, 0))))
         self.report_card.setVisible(True)
-        # 'Undo' is only meaningful for the operation we just produced —
-        # which IS the latest one at this moment.  It will turn into "an
-        # older op" the moment the user runs another organise; the
-        # History tab governs that case explicitly.
-        self.btn_rollback.setEnabled(bool(op.operation_id) and not op.dry_run)
 
     def on_failed(self, msg: str):
         self.set_running(False)
@@ -530,10 +520,6 @@ class OrganizeView(QtWidgets.QWidget):
         d = default_paths().logs_dir
         d.mkdir(parents=True, exist_ok=True)
         _open_in_explorer(d)
-
-    def _emit_rollback(self):
-        if self._last_op and self._last_op.operation_id:
-            self.rollback_requested.emit(self._last_op.operation_id)
 
     def _open_target(self):
         if self._last_op:
@@ -675,8 +661,6 @@ class SearchView(QtWidgets.QWidget):
 
 
 class HistoryView(QtWidgets.QWidget):
-    rollback_requested = QtCore.Signal(int)
-
     def __init__(self, index_db: IndexDB, parent=None):
         super().__init__(parent)
         self.index_db = index_db
@@ -685,16 +669,21 @@ class HistoryView(QtWidgets.QWidget):
         v.setSpacing(14)
         t = QtWidgets.QLabel("히스토리")
         t.setObjectName("Title")
-        sub = QtWidgets.QLabel("최근 정리 작업을 확인하고 원하면 되돌릴 수 있습니다.")
+        sub = QtWidgets.QLabel(
+            "지난 정리 결과들. 행을 더블클릭하면 그 실행의 리포트를 엽니다."
+        )
         sub.setObjectName("Subtitle")
         v.addWidget(t)
         v.addWidget(sub)
 
-        self.table = QtWidgets.QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["ID", "대상 폴더", "시작", "파일 수", "모드"])
+        self.table = QtWidgets.QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "대상 폴더", "시작", "파일 수", "모드", "리포트"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.cellDoubleClicked.connect(self._on_double_click)
         v.addWidget(self.table, 1)
 
         row = QtWidgets.QHBoxLayout()
@@ -702,65 +691,56 @@ class HistoryView(QtWidgets.QWidget):
         btn_refresh = QtWidgets.QPushButton("새로고침")
         btn_refresh.setObjectName("Ghost")
         btn_refresh.clicked.connect(self.refresh)
-        btn_rb = QtWidgets.QPushButton("선택 롤백")
-        btn_rb.setObjectName("Warning")
-        btn_rb.clicked.connect(self._rollback_selected)
         row.addWidget(btn_refresh)
-        row.addWidget(btn_rb)
         v.addLayout(row)
+
+        self._report_paths: dict[int, str] = {}
 
     def refresh(self):
         ops = self.index_db.list_operations(limit=100)
         self.table.setRowCount(len(ops))
+        self._report_paths.clear()
         for row, op in enumerate(ops):
             self.table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(op.op_id)))
             self.table.setItem(row, 1, QtWidgets.QTableWidgetItem(op.target_root))
             self.table.setItem(row, 2, QtWidgets.QTableWidgetItem(op.started_at))
             self.table.setItem(row, 3, QtWidgets.QTableWidgetItem(str(op.moved_count)))
             self.table.setItem(row, 4, QtWidgets.QTableWidgetItem("Dry" if op.dry_run else "실행"))
+            rp = (op.report_path or "").strip()
+            if rp and Path(rp).exists():
+                report_label = "📄 더블클릭"
+                self._report_paths[op.op_id] = rp
+            elif rp:
+                report_label = "(파일 없음)"
+            else:
+                report_label = "(미생성)"
+            self.table.setItem(row, 5, QtWidgets.QTableWidgetItem(report_label))
 
-    def _rollback_selected(self):
-        idxs = self.table.selectionModel().selectedRows()
-        if not idxs:
+    def _on_double_click(self, row: int, _col: int):
+        try:
+            op_id = int(self.table.item(row, 0).text())
+        except (ValueError, AttributeError):
             return
-        row = idxs[0].row()
-        op_id = int(self.table.item(row, 0).text())
-        latest = self.index_db.latest_operation_id()
-        is_latest = (latest is not None and op_id == latest)
-
-        if is_latest:
-            resp = QtWidgets.QMessageBox.question(
-                self,
-                "롤백",
-                f"가장 최근 정리(#{op_id})를 되돌립니다. 진행할까요?",
-                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
-            )
-            if resp == QtWidgets.QMessageBox.Yes:
-                self.rollback_requested.emit(op_id)
+        rp = self._report_paths.get(op_id)
+        if rp:
+            _open_in_explorer(Path(rp))
             return
-
-        # Older operation: gate behind a much louder, explicit warning.
-        warn = QtWidgets.QMessageBox(self)
-        warn.setIcon(QtWidgets.QMessageBox.Warning)
-        warn.setWindowTitle("이전 정리 롤백 — 위험")
-        warn.setText(
-            f"오퍼레이션 #{op_id} 은(는) 가장 최근 정리가 아닙니다.\n"
-            "그 이후에 사용자가 폴더를 더 정리했거나 파일을 옮겼다면,\n"
-            "이 작업은 새로 만든 결과를 덮어쓰거나 깨뜨릴 수 있습니다."
+        # Fallback: try to find a report under the target_root that
+        # was saved by an older build that didn't yet persist the path.
+        target = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+        if target:
+            try:
+                candidates = sorted(Path(target).glob("FolderAngel_Report_*.md"))
+                if candidates:
+                    _open_in_explorer(candidates[-1])
+                    return
+            except Exception:
+                pass
+        QtWidgets.QMessageBox.information(
+            self, "리포트 없음",
+            "이 실행의 리포트 파일을 찾지 못했습니다."
+            " 보고서 파일이 삭제됐거나 대상 폴더가 이동됐을 수 있습니다.",
         )
-        warn.setInformativeText(
-            "안전하게 되돌리려면 가장 최근 정리부터 차례로 롤백하세요.\n"
-            "그래도 진행하시겠다면 '강제 롤백'을 선택하세요. "
-            "기록과 다르게 이미 옮긴 파일은 자동으로 건너뜁니다."
-        )
-        cancel = warn.addButton("취소", QtWidgets.QMessageBox.RejectRole)
-        force = warn.addButton("강제 롤백", QtWidgets.QMessageBox.DestructiveRole)
-        warn.setDefaultButton(cancel)
-        warn.exec()
-        if warn.clickedButton() is force:
-            # Emit with the force-flag convention: negative op_id means force.
-            # (Keeps the existing Signal signature backwards compatible.)
-            self.rollback_requested.emit(-op_id)
 
 
 class SettingsView(QtWidgets.QWidget):

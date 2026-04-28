@@ -167,15 +167,18 @@ def run(
     else:
         op.llm_usage = LLMUsage(model="mock")
 
+    # Write the markdown report FIRST so its path is available to
+    # ``record_operation`` for storage in stats_json — that lets the
+    # History tab open the report on double-click without globbing.
+    try:
+        op.report_path = emit_markdown(op)
+    except Exception as exc:
+        log.warning("report failed: %s", exc)
+
     if index_db is not None and not dry_run:
         try:
             index_db.record_operation(op)
         except Exception as exc:
             log.warning("index record failed: %s", exc)
-
-    try:
-        emit_markdown(op)
-    except Exception as exc:
-        log.warning("report failed: %s", exc)
 
     return op

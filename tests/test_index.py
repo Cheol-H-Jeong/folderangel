@@ -43,25 +43,6 @@ def test_record_and_search(tmp_path):
     db.close()
 
 
-def test_rollback_restores_files(tmp_path):
-    # Create the actual files so rollback can move them back.
-    notes = tmp_path / "메모"
-    notes.mkdir()
-    f = notes / "a.txt"
-    f.write_text("hello")
-    op = _sample_op(tmp_path)
-    op.moved[0].original_path = tmp_path / "a.txt"
-    op.moved[0].new_path = f
-
-    db = IndexDB(tmp_path / "idx.db")
-    op_id = db.record_operation(op)
-    res = db.rollback(op_id)
-    assert res.restored == 1
-    assert (tmp_path / "a.txt").exists()
-    assert not f.exists()
-    db.close()
-
-
 def _make_recorded_op(tmp_path: Path, src_name: str, dst_dir: str):
     from folderangel.models import Category, MovedFile, OperationResult
     folder = tmp_path / dst_dir
@@ -89,32 +70,6 @@ def _make_recorded_op(tmp_path: Path, src_name: str, dst_dir: str):
         skipped=[],
         total_scanned=1,
     )
-
-
-def test_rollback_refuses_older_op_without_force(tmp_path):
-    db = IndexDB(tmp_path / "idx.db")
-    op_id_1 = db.record_operation(_make_recorded_op(tmp_path, "a.txt", "f1"))
-    db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))  # newer
-    res = db.rollback(op_id_1)  # not the latest — must refuse
-    assert res.restored == 0
-    assert res.failed and "not the most recent" in res.failed[0]
-    db.close()
-
-
-def test_rollback_force_skips_collisions(tmp_path):
-    db = IndexDB(tmp_path / "idx.db")
-    op_id_1 = db.record_operation(_make_recorded_op(tmp_path, "a.txt", "f1"))
-    db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))
-    # Simulate the user manually creating a file at the original location
-    # in the meantime — rollback must NOT overwrite it even with force.
-    blocker = tmp_path / "a.txt"
-    blocker.write_text("user-edit")
-    res = db.rollback(op_id_1, force=True)
-    assert res.restored == 0
-    assert any("already occupied" in msg for msg in res.failed)
-    # And the user's file is intact.
-    assert blocker.read_text() == "user-edit"
-    db.close()
 
 
 def test_search_finds_by_filename_substring(tmp_path):
@@ -169,4 +124,63 @@ def test_latest_operation_id(tmp_path):
     b = db.record_operation(_make_recorded_op(tmp_path, "b.txt", "f2"))
     assert db.latest_operation_id() == b
     assert b > a
+    db.close()
+
+
+def test_record_operation_dedups_by_path(tmp_path):
+    """A file that has been organised before — at any path — must not
+    appear twice in the index after it is re-classified.  The user's
+    pain: search returned the same file under both old and new paths,
+    and the old row's link was broken."""
+    db = IndexDB(tmp_path / "idx.db")
+    # Run 1: organise a.txt into f1/
+    op1 = _make_recorded_op(tmp_path, "a.txt", "f1")
+    db.record_operation(op1)
+    # Run 2: a.txt's NEW location is now f1/a.txt → it gets moved into f2/
+    from folderangel.models import Category, MovedFile, OperationResult
+    folder2 = tmp_path / "f2"
+    folder2.mkdir()
+    new_path = folder2 / "a.txt"
+    # Simulate the disk move: file lives at new_path now.
+    (tmp_path / "f1" / "a.txt").rename(new_path)
+    op2 = OperationResult(
+        target_root=tmp_path,
+        started_at=datetime.now().astimezone(),
+        finished_at=datetime.now().astimezone(),
+        dry_run=False,
+        categories=[Category(id="c", name="f2")],
+        moved=[MovedFile(
+            original_path=tmp_path / "f1" / "a.txt",
+            new_path=new_path,
+            category_id="c",
+            reason="re-org",
+            score=1.0,
+        )],
+        skipped=[],
+        total_scanned=1,
+    )
+    db.record_operation(op2)
+    hits = db.search("a.txt")
+    # Exactly ONE hit — the latest location.  No stale duplicates.
+    matching = [h for h in hits if h.new_path.endswith("a.txt")]
+    assert len(matching) == 1, (
+        f"expected single de-duped hit, got {len(matching)}: "
+        f"{[h.new_path for h in matching]}"
+    )
+    assert matching[0].new_path == str(new_path)
+    db.close()
+
+
+def test_record_operation_persists_report_path(tmp_path):
+    """Pipeline writes the report first then records the operation; the
+    report path must round-trip through stats_json so HistoryView can
+    open it on double-click."""
+    db = IndexDB(tmp_path / "idx.db")
+    op = _make_recorded_op(tmp_path, "a.txt", "f1")
+    rp = tmp_path / "FolderAngel_Report_20260101_120000.md"
+    rp.write_text("# Report")
+    op.report_path = rp
+    db.record_operation(op)
+    ops = db.list_operations()
+    assert ops and ops[0].report_path == str(rp)
     db.close()

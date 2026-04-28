@@ -91,8 +91,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.organize_view.start_requested.connect(self._start)
         self.organize_view.cancel_requested.connect(self._cancel)
-        self.organize_view.rollback_requested.connect(self._rollback)
-        self.history_view.rollback_requested.connect(self._rollback)
         self.settings_view.config_changed.connect(self._on_config_changed)
 
         # Menu / shortcuts --------------------------------------------
@@ -207,17 +205,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._thread.wait(2000)
         self._thread = None
         self._worker = None
-
-    def _rollback(self, op_id: int):
-        # Negative op_id is the UI's convention for "force this older op".
-        force = op_id < 0
-        real_id = -op_id if force else op_id
-        res = self.index_db.rollback(real_id, force=force)
-        msg = f"복원: {res.restored}개"
-        if res.failed:
-            msg += f"\n실패/건너뜀: {len(res.failed)}개\n" + "\n".join(res.failed[:5])
-        QtWidgets.QMessageBox.information(self, "롤백 완료", msg)
-        self.history_view.refresh()
 
     def closeEvent(self, event: QtGui.QCloseEvent):
         try:
