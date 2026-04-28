@@ -198,24 +198,39 @@ def run(
                 )
 
     client = None
+    key = None
     if not force_mock:
         key = get_api_key(config, provider=config.llm_provider)
-        if key:
-            try:
-                client = make_llm_client(config, key)
-            except Exception as exc:
-                log.warning("llm init failed: %s", exc)
-                client = None
+        # Try to build the client even when no key — make_llm_client
+        # accepts local URLs (Ollama / vLLM / LM Studio) without auth.
+        try:
+            client = make_llm_client(config, key)
+        except Exception as exc:
+            log.warning("llm init failed: %s", exc)
+            client = None
 
     if progress:
+        from .config import provider_label
         if client is not None:
-            from .config import provider_label
-
+            key_state = (
+                "키 등록됨" if key else "키 없음(로컬 LLM)"
+            )
             progress(
-                f"plan: {provider_label(config)} ({config.model}) 호출 준비", 0.0
+                f"plan: {provider_label(config)} ({config.model}) — "
+                f"{key_state} / {config.llm_base_url or '(기본 endpoint)'}",
+                0.0,
             )
         else:
-            progress("plan: Mock 휴리스틱 모드", 0.0)
+            # Tell the user *why* we fell to mock — usually means no
+            # key for the provider they just switched to.
+            reason = (
+                "API 키가 등록되지 않음 — 설정에서 현재 provider 의 키를 등록하세요"
+                if not key else "LLM 클라이언트 초기화 실패 — 로그 확인"
+            )
+            progress(
+                f"plan: Mock 휴리스틱 모드 ({provider_label(config)} {reason})",
+                0.0,
+            )
     planner = Planner(
         config, gemini=client, cancel_check=cancel_check,
         seed_categories=seed_categories,

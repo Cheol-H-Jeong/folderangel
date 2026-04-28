@@ -143,3 +143,61 @@ def test_report_includes_dedup_ledger(tmp_path):
     assert "/dl/movie.mp4" in text
     assert "50.0 MB" in text or "50 MB" in text
     assert "75.0 MB" in text or "75 MB" in text
+
+
+def test_get_api_key_does_not_leak_gemini_to_openai_compat(tmp_path, monkeypatch):
+    """Switching from Gemini → openai_compat must NOT return the
+    legacy gemini_api_key slot's value, which is what caused 401s
+    when users picked their local Qwen preset.
+    """
+    from folderangel.config import (
+        Config, AppPaths, get_api_key, save_config,
+    )
+
+    # Force config-level fallback path (no real keyring).  We exercise
+    # the slot logic by patching the keyring lookup to mimic 'only
+    # gemini slot is populated'.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("FOLDERANGEL_OPENAI_API_KEY", raising=False)
+
+    class FakeKeyring:
+        def __init__(self):
+            self.store = {("folderangel", "gemini_api_key"): "GEMINI-SECRET"}
+
+        def get_password(self, service, slot):
+            return self.store.get((service, slot))
+
+    fake = FakeKeyring()
+    monkeypatch.setattr("folderangel.config._try_keyring", lambda: fake)
+
+    cfg = Config()
+    cfg.llm_provider = "gemini"
+    cfg.api_key_fallback = ""
+    assert get_api_key(cfg) == "GEMINI-SECRET"
+
+    cfg.llm_provider = "openai_compat"
+    leaked = get_api_key(cfg)
+    assert leaked is None, (
+        f"openai_compat lookup leaked the gemini key: {leaked!r}"
+    )
+
+
+def test_make_llm_client_allows_local_without_key():
+    """Local Ollama / vLLM endpoints don't need an API key — the
+    client builder must synthesise a placeholder so the user doesn't
+    have to register a fake one."""
+    from folderangel.config import Config
+    from folderangel.llm.client import make_llm_client, OpenAICompatClient
+
+    cfg = Config()
+    cfg.llm_provider = "openai_compat"
+    cfg.llm_base_url = "http://localhost:11434/v1"
+    cfg.model = "qwen2.5"
+    client = make_llm_client(cfg, api_key=None)
+    assert isinstance(client, OpenAICompatClient)
+    # Cloud URL with no key still falls to mock.
+    cfg.llm_base_url = "https://api.openai.com/v1"
+    assert make_llm_client(cfg, api_key=None) is None

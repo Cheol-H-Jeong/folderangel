@@ -96,18 +96,27 @@ def infer_provider_from_url(base_url: str, model: str = "") -> str:
 def make_llm_client(config, api_key: Optional[str]):
     """Build the appropriate LLM client from a :class:`Config`.
 
-    Returns ``None`` when no key is available so the caller can fall
-    back to the mock planner.  The ``llm_provider`` config field is
-    derived from the URL when missing — the user is never asked to
-    pick a provider explicitly.
+    Returns ``None`` when no key is available *and* the endpoint
+    isn't a local server, so the caller can fall back to the mock
+    planner.  Local backends (Ollama / vLLM / LM Studio at 127.0.0.1
+    or localhost) don't need a key — we synthesise a placeholder so
+    the OpenAI-compatible client still has a non-empty Authorization
+    header (most local servers ignore its value).
     """
-    if not api_key:
-        return None
     base_url = (getattr(config, "llm_base_url", "") or "").strip()
     model = getattr(config, "model", "")
     provider = (getattr(config, "llm_provider", "") or "").lower()
     if provider not in ("gemini", "openai_compat"):
         provider = infer_provider_from_url(base_url, model)
+    if not api_key:
+        url_lc = base_url.lower()
+        is_local = any(
+            h in url_lc for h in ("127.0.0.1", "localhost", "0.0.0.0", "host.docker.internal")
+        )
+        if provider == "openai_compat" and is_local:
+            api_key = "local-no-auth"
+        else:
+            return None
     if provider == "gemini":
         client = GeminiClient(api_key=api_key, model=model or "gemini-2.5-flash")
         if base_url and ("googleapis.com" in base_url or "google" in base_url):

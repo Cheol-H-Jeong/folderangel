@@ -290,11 +290,18 @@ def _try_keyring():  # lazily imported so tests don't need it
 def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) -> Optional[str]:
     """Resolve the API key for the *current* (or specified) provider.
 
-    Lookup order: env → keyring (provider-specific) → keyring (legacy) →
-    config fallback.  Env vars checked depend on provider:
+    Lookup order: env → keyring (provider-specific) → legacy fallback
+    *only when looking up gemini* → config fallback.  Env vars
+    checked depend on provider:
 
       gemini        → GEMINI_API_KEY, GOOGLE_API_KEY
       openai_compat → OPENAI_API_KEY, FOLDERANGEL_OPENAI_API_KEY
+
+    Past bug: lookup for ``openai_compat`` would fall back to the
+    legacy ``gemini_api_key`` slot when its own slot was empty,
+    silently sending the Gemini key to a local Qwen/Ollama backend
+    and triggering an auth error.  The legacy slot is only used as a
+    fallback for the gemini provider it was originally minted for.
     """
     p = (provider or (cfg.llm_provider if cfg else "gemini")).lower()
     env_keys = (
@@ -308,9 +315,12 @@ def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) ->
             return v.strip()
     kr = _try_keyring()
     if kr is not None:
-        # provider-specific slot first, then legacy "gemini_api_key" so we
-        # don't lose users who configured the app before this split.
-        for slot in (_keyring_user_for(p), _KEYRING_USER):
+        slots = [_keyring_user_for(p)]
+        if p == "gemini" and _KEYRING_USER not in slots:
+            # Only the gemini provider uses the legacy slot — it was
+            # the original (single-provider) key store.
+            slots.append(_KEYRING_USER)
+        for slot in slots:
             try:
                 value = kr.get_password(_KEYRING_SERVICE, slot)
                 if value:
@@ -318,7 +328,11 @@ def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) ->
             except Exception as exc:
                 log.warning("keyring read failed: %s", exc)
                 break
-    if cfg and cfg.api_key_fallback:
+    # config-level fallback: only use it when the *currently active*
+    # provider matches the one the fallback was last saved for
+    # (config doesn't track that, so be conservative — only for gemini
+    # which is the historical default).
+    if cfg and cfg.api_key_fallback and p == "gemini":
         return cfg.api_key_fallback.strip()
     return None
 
