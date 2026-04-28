@@ -118,9 +118,29 @@ class _FakeClient:
 
     def generate_json(self, prompt, **_kw):
         self.calls += 1
-        # Parse rep filenames out of the prompt — tests synthesise paths
-        # like /work/알파_007_v3.pdf, so a substring scan suffices.
         import re
+        # Detect rolling-window prompt format vs legacy format.
+        is_rolling = '"i":' in prompt and '"n":' in prompt
+        if is_rolling:
+            # Rolling: respond with new_categories + fid-keyed assignments.
+            seen_cats: dict[str, str] = {}
+            cats: list[dict] = []
+            assigns: list[dict] = []
+            for m in re.finditer(r'\{"i":(\d+),"n":"([^"]+)"', prompt):
+                fid, fname = int(m.group(1)), m.group(2)
+                pm = re.match(r"([A-Za-z]+)_제안서_v\d+\.pdf", fname)
+                cid = f"proj-{pm.group(1)}" if pm else "misc"
+                if cid not in seen_cats and cid != "misc":
+                    seen_cats[cid] = cid
+                    cats.append({
+                        "id": cid,
+                        "name": cid.replace("-", " ").title(),
+                        "group": 1, "time_label": "", "duration": "mixed",
+                    })
+                assigns.append({"i": fid, "c": cid, "p": 0.9, "r": "fake"})
+            return {"new_categories": cats, "assignments": assigns}
+
+        # Legacy format: parse rep filenames from /work/ paths.
         names = re.findall(r"/work/([^\"\\\s]+)", prompt)
         seen_cats: dict[str, str] = {}
         cats: list[dict] = []
@@ -847,6 +867,144 @@ def test_compatibility_rejects_student_to_drug_ai():
     assert score >= sim.THRESHOLD_GUESS_BY_TIME, (
         f"의약품 file scored only {score:.3f}, expected ≥ rescue threshold"
     )
+
+
+def test_rolling_capacity_and_chunk_sizing():
+    """The rolling planner's per-call capacity must be derived from
+    the *effective* context window, not the advertised one."""
+    from folderangel import rolling
+    from folderangel.config import Config
+
+    cfg = Config()
+    cfg.model = "gemini-2.5-flash"
+    cap = rolling.estimate_files_capacity(cfg)
+    assert 300 <= cap <= 700, f"flash effective cap looks wrong: {cap}"
+
+    cfg.model = "gemini-2.5-pro"
+    cap = rolling.estimate_files_capacity(cfg)
+    assert 600 <= cap <= 1500, f"pro effective cap looks wrong: {cap}"
+
+    cfg.model = "claude-sonnet-4"
+    cap = rolling.estimate_files_capacity(cfg)
+    assert 500 <= cap <= 1100, f"sonnet effective cap looks wrong: {cap}"
+
+    # Unknown model + tiny assumed ctx → effective ≈ 4K, all eaten by
+    # overhead → cap == 0 → ``should_use_rolling`` returns False and
+    # the corpus goes through the legacy micro-batch path.
+    cfg.model = "totally-unknown-model"
+    cfg.assumed_ctx_tokens = 8192
+    cap = rolling.estimate_files_capacity(cfg)
+    assert cap < rolling.MIN_CHUNK_FILES, (
+        f"unknown small-ctx model expected to fall through, cap={cap}"
+    )
+
+
+def test_rolling_skips_for_tiny_corpus_or_starved_ctx():
+    """should_use_rolling must NOT fire for sub-MIN_CHUNK corpora
+    (too small) or for models that can't take MIN_CHUNK_FILES per
+    call (better routed to micro-batch)."""
+    from folderangel import rolling
+    from folderangel.config import Config
+
+    cfg = Config()
+    cfg.model = "gemini-2.5-flash"
+    assert rolling.should_use_rolling(cfg, n_files=10) is False
+    assert rolling.should_use_rolling(cfg, n_files=200) is True
+
+    cfg.model = "tiny-local"
+    cfg.assumed_ctx_tokens = 4096   # too small for the rolling path
+    assert rolling.should_use_rolling(cfg, n_files=200) is False
+
+
+def test_rolling_collapses_duplicate_signatures():
+    """Files with identical signatures (e.g. 100 weekly invoices that
+    differ only by date) must collapse into a single FileRow — sending
+    100 nearly-identical rows wastes the prompt budget."""
+    from folderangel import rolling
+
+    entries = (
+        [_entry(f"강의평가_{i:03}.pdf", content="강의 평가 의견 본문") for i in range(50)]
+        + [_entry("의약품 AI 심사 제안서.pdf", content="의약품 AI 심사 제안서 본문")]
+    )
+    rows = rolling.build_rows(entries)
+    # All 50 lecture-eval files share a sig + body slice → collapse to 1
+    eval_rows = [r for r in rows if r.name.startswith("강의평가_")]
+    drug_rows = [r for r in rows if r.name.startswith("의약품")]
+    assert len(eval_rows) == 1, (
+        f"expected duplicate collapse, got {len(eval_rows)} rows"
+    )
+    assert eval_rows[0].members and len(eval_rows[0].members) == 50
+    assert len(drug_rows) == 1
+
+
+def test_rolling_end_to_end_with_fake_llm(tmp_path):
+    """Walk the full rolling-plan path with a fake LLM that returns a
+    minimal response — verify fid expansion replicates the assignment
+    to every collapsed sibling."""
+    from folderangel.config import Config
+    from folderangel.planner import Planner
+
+    cfg = Config()
+    cfg.model = "gemini-2.5-flash"
+    cfg.reclassify_mode = True
+    cfg.small_corpus_files = 1   # force out of "small" tier
+
+    seen_prompts: list[str] = []
+
+    class _Fake:
+        def generate_json(self, prompt, **_kw):
+            seen_prompts.append(prompt)
+            # Look at the file rows in the prompt and assign each fid.
+            # Trust that the prompt JSON has "files":[{"i":N,...}].
+            import re as _re
+            ids = [int(m) for m in _re.findall(r'"i"\s*:\s*(\d+)', prompt)]
+            # Distinct: fids appear in files block + possibly in
+            # categories — but we're early so categories are empty.
+            new_cats = [
+                {"id": "drug-ai", "name": "의약품 AI 심사",
+                 "description": "", "duration": "annual",
+                 "time_label": "2025", "group": 1},
+                {"id": "lecture-eval", "name": "강의 평가",
+                 "description": "", "duration": "mixed",
+                 "time_label": "", "group": 2},
+            ]
+            assigns = []
+            # Decide based on filename in the prompt.  Crude.
+            for m in _re.finditer(
+                r'\{"i":(\d+),"n":"([^"]+)"', prompt
+            ):
+                fid, fname = int(m.group(1)), m.group(2)
+                if "강의평가" in fname:
+                    assigns.append({"i": fid, "c": "lecture-eval",
+                                    "p": 0.9, "r": "강의평가 자료"})
+                elif "의약품" in fname:
+                    assigns.append({"i": fid, "c": "drug-ai",
+                                    "p": 0.95, "r": "의약품 AI 심사"})
+                else:
+                    assigns.append({"i": fid, "c": "misc",
+                                    "p": 0.3, "r": "단서 부족"})
+            return {"new_categories": new_cats, "assignments": assigns}
+
+    entries = (
+        [_entry(f"강의평가_{i:03}.pdf", content="강의 평가") for i in range(50)]
+        + [_entry("의약품 AI 심사 제안서.pdf", content="의약품 AI 심사 제안서 본문")]
+        + [_entry("정체불명_파일_x9z.bin", content="")]
+    )
+
+    p = Planner(cfg, gemini=_Fake())
+    plan = p.plan(entries)
+
+    assert len(plan.assignments) == len(entries), (
+        f"every entry must get assigned, got {len(plan.assignments)}/{len(entries)}"
+    )
+    eval_assigns = [a for a in plan.assignments
+                    if a.file_path.name.startswith("강의평가_")]
+    assert len(eval_assigns) == 50
+    # All 50 should have inherited the same category.
+    assert {a.primary_category_id for a in eval_assigns} == {"lecture-eval"}
+    drug = [a for a in plan.assignments
+            if a.file_path.name.startswith("의약품")]
+    assert drug[0].primary_category_id == "drug-ai"
 
 
 def test_tier_picker_picks_correct_tier():

@@ -658,13 +658,40 @@ class Planner:
             progress(self._tier_announcement(tier, len(entries)), 0.16)
 
         # ------------------------------------------------------------------
-        # Re-classify filename-first pass.  Only fires when the user
-        # explicitly enabled "재분류 모드" AND the corpus is big enough
-        # that it would otherwise hit the medium/large tier.  We send a
-        # *filename-only* payload (no body, no path tail) so the LLM can
-        # cheaply pick out the obvious project/사업/기관 buckets and
-        # tell us which files it can't classify by name alone — those
-        # get deferred to the body-aware tier pipeline below.
+        # Rolling-window planner.  Replaces the old hierarchical /
+        # filename-first / outlier-discover stack for every provider
+        # whose effective context window can hold at least
+        # MIN_CHUNK_FILES per call.  See :mod:`folderangel.rolling`.
+        # ------------------------------------------------------------------
+        try:
+            from . import rolling as _rolling
+        except Exception as exc:
+            log.warning("rolling module unavailable (%s); falling through", exc)
+            _rolling = None
+
+        if _rolling is not None and _rolling.should_use_rolling(self.config, len(entries)):
+            try:
+                if progress:
+                    cap = _rolling.estimate_files_capacity(self.config)
+                    progress(
+                        f"plan: rolling 모드 — 1콜당 최대 {cap}파일",
+                        0.18,
+                    )
+                plan_dict = self._rolling_plan(entries, payloads, progress)
+                return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
+            except Exception as exc:
+                log.warning("rolling plan failed; falling through: %s", exc)
+
+        # ------------------------------------------------------------------
+        # Legacy: re-classify filename-first pass.  Only fires when the
+        # user explicitly enabled "재분류 모드" AND the corpus is big
+        # enough that it would otherwise hit the medium/large tier.  We
+        # send a *filename-only* payload (no body, no path tail) so the
+        # LLM can cheaply pick out the obvious project/사업/기관 buckets
+        # and tell us which files it can't classify by name alone —
+        # those get deferred to the body-aware tier pipeline below.
+        # Kept as a safety net while the rolling planner soaks; will be
+        # removed once it is proven on real corpora.
         # ------------------------------------------------------------------
         if (
             anonymise
@@ -863,6 +890,169 @@ class Planner:
         plan_dict = {"categories": categories_payload, "assignments": assignments_raw}
         return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
 
+
+    # ------------------------------------------------------------------
+    def _rolling_plan(
+        self,
+        entries: list[FileEntry],
+        payloads: list[dict],
+        progress: Optional[ProgressCB],
+    ) -> dict:
+        """Linear single-pass planner.  See :mod:`folderangel.rolling`."""
+        from . import rolling as _rolling
+
+        anonymise = bool(getattr(self.config, "reclassify_mode", False))
+        rows = _rolling.build_rows(entries, reclassify_mode=anonymise)
+        eff_ctx = _rolling.estimate_effective_ctx(self.config)
+
+        # Initial chunk size assumes a small (10-cat) catalogue; later
+        # chunks recompute based on the actual cumulative catalogue.
+        cum_cats: list[dict] = []
+        cum_assigns: list[dict] = []   # raw {"i":fid, "c":cid, "p":..., "r":...}
+        seen_cat_ids: set[str] = set()
+
+        idx = 0
+        total_rows = len(rows)
+        while idx < total_rows:
+            chunk_size = _rolling.compute_chunk_size(eff_ctx, len(cum_cats))
+            chunk = rows[idx : idx + chunk_size]
+            chunk_payload = [_rolling.row_to_payload(r) for r in chunk]
+            prompt = _rolling.build_rolling_prompt(
+                cum_cats,
+                chunk_payload,
+                ambiguity_threshold=self.config.ambiguity_threshold,
+                reclassify_mode=anonymise,
+            )
+            chunk_no = (idx // max(1, chunk_size)) + 1
+            n_chunks_est = (total_rows + chunk_size - 1) // chunk_size
+            if progress:
+                progress(
+                    f"plan: rolling [{chunk_no}/{n_chunks_est}] LLM 호출 "
+                    f"({len(chunk)} 시그니처 / 누적 카테고리 {len(cum_cats)})…",
+                    0.2 + (idx / max(1, total_rows)) * 0.7,
+                )
+            try:
+                resp = self._llm_call(
+                    prompt,
+                    heartbeat=self._heartbeat_for(
+                        f"rolling [{chunk_no}/{n_chunks_est}] 응답 대기", progress
+                    ),
+                    stream_label=f"rolling [{chunk_no}/{n_chunks_est}] 토큰 수신",
+                    progress=progress,
+                )
+            except LLMError as exc:
+                log.warning("rolling chunk %d failed: %s", chunk_no, exc)
+                # Mark every file in this chunk as misc — the
+                # ``_plan_from_dict`` rescue will try to recover them.
+                for r in chunk:
+                    cum_assigns.append({"i": r.fid, "c": "misc",
+                                         "p": 0.3, "r": "rolling 호출 실패"})
+                idx += len(chunk)
+                continue
+
+            for c in (resp.get("new_categories") or []):
+                cid = (c.get("id") or "").strip()
+                if not cid or cid in seen_cat_ids:
+                    continue
+                cum_cats.append(c)
+                seen_cat_ids.add(cid)
+            for a in (resp.get("assignments") or []):
+                if not isinstance(a, dict):
+                    continue
+                cum_assigns.append(a)
+
+            idx += len(chunk)
+
+        # ------------------------------------------------------------------
+        # Consolidation pass — only when we actually had to chunk.  The
+        # LLM gets just the catalogue (no files) and is asked to merge
+        # near-duplicate categories.
+        # ------------------------------------------------------------------
+        n_chunks = max(1, (total_rows + 1) // max(1, _rolling.compute_chunk_size(eff_ctx, 0)))
+        if len(cum_cats) > 0 and n_chunks >= 2:
+            if progress:
+                progress(
+                    f"plan: rolling consolidation — 카테고리 {len(cum_cats)}개 통합 검토",
+                    0.93,
+                )
+            try:
+                cprompt = _rolling.build_consolidation_prompt(cum_cats)
+                cresp = self._llm_call(
+                    cprompt,
+                    heartbeat=self._heartbeat_for("rolling consolidation 응답 대기", progress),
+                    stream_label="rolling consolidation 토큰 수신",
+                    progress=progress,
+                )
+                merges = cresp.get("merges") or []
+                # Apply merges: drop[*] → keep
+                drop_to_keep: dict[str, str] = {}
+                for m in merges:
+                    if not isinstance(m, dict):
+                        continue
+                    keep = (m.get("keep") or "").strip()
+                    if not keep or keep not in seen_cat_ids:
+                        continue
+                    for d in (m.get("drop") or []):
+                        d = (d or "").strip()
+                        if d and d in seen_cat_ids and d != keep:
+                            drop_to_keep[d] = keep
+                if drop_to_keep:
+                    cum_cats = [c for c in cum_cats
+                                if (c.get("id") or "") not in drop_to_keep]
+                    seen_cat_ids = {c.get("id") for c in cum_cats}
+                    for a in cum_assigns:
+                        cid = (a.get("c") or "").strip()
+                        if cid in drop_to_keep:
+                            a["c"] = drop_to_keep[cid]
+            except Exception as exc:
+                log.warning("consolidation pass failed (%s); using raw catalogue", exc)
+
+        # ------------------------------------------------------------------
+        # Expand fid-keyed assignments back to per-file (path-keyed) ones,
+        # since duplicate signatures collapsed multiple files into one row.
+        # ------------------------------------------------------------------
+        rows_by_fid = {r.fid: r for r in rows}
+        seen_paths: set[str] = set()
+        out_assigns: list[dict] = []
+        for a in cum_assigns:
+            try:
+                fid = int(a.get("i"))
+            except (TypeError, ValueError):
+                continue
+            row = rows_by_fid.get(fid)
+            if row is None:
+                continue
+            cid = (a.get("c") or "misc").strip() or "misc"
+            try:
+                pscore = float(a.get("p") or 0.0)
+            except (TypeError, ValueError):
+                pscore = 0.0
+            reason = (a.get("r") or "").strip() or "rolling 분류"
+            for member in row.members:
+                p = str(member.path)
+                if p in seen_paths:
+                    continue
+                seen_paths.add(p)
+                out_assigns.append({
+                    "path": p,
+                    "primary": cid,
+                    "primary_score": pscore,
+                    "secondary": [],
+                    "reason": reason,
+                })
+
+        # Convert cumulative categories into the same shape ``_plan_from_dict``
+        # expects.  Group is mandatory — coerce to 9 if missing.
+        out_cats: list[dict] = []
+        for c in cum_cats:
+            d = dict(c)
+            try:
+                d["group"] = int(d.get("group") or 9) or 9
+            except (TypeError, ValueError):
+                d["group"] = 9
+            out_cats.append(d)
+
+        return {"categories": out_cats, "assignments": out_assigns}
 
     # ------------------------------------------------------------------
     def _should_use_microbatch(self, payloads: Optional[list[dict]] = None) -> bool:
