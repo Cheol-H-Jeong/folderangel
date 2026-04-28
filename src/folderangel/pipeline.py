@@ -157,18 +157,30 @@ def run(
     # ------------------------------------------------------------------
     dedup_groups = []
     canonical_only = entries
-    if not dry_run and getattr(config, "dedup_min_bytes", 0) >= 0:
+    min_bytes = int(getattr(config, "dedup_min_bytes", 1_048_576) or 0)
+    if dry_run:
+        if progress:
+            progress("dedup: Dry-Run 모드 — 중복 검사 건너뜀", 0.07)
+    elif min_bytes < 0:
+        if progress:
+            progress("dedup: 비활성 (dedup_min_bytes < 0)", 0.07)
+    else:
         from . import dedup as _dedup
-        dedup_groups = _dedup.find_duplicate_groups(
-            entries, min_bytes=int(getattr(config, "dedup_min_bytes", 1_048_576) or 0)
-        )
+        if progress:
+            mb_thr = min_bytes / (1 << 20)
+            progress(
+                f"dedup: 중복 검사 시작 — 임계값 {mb_thr:.1f} MB / "
+                f"{len(entries)} 파일 검사",
+                0.06,
+            )
+        dedup_groups = _dedup.find_duplicate_groups(entries, min_bytes=min_bytes)
         if dedup_groups:
             n_dupes = sum(len(g.duplicates) for g in dedup_groups)
             mb_save = sum(g.total_bytes_freed for g in dedup_groups) / (1 << 20)
             if progress:
                 progress(
-                    f"dedup: 중복 파일 {n_dupes}개 발견 → 분류는 1개만 / "
-                    f"≈ {mb_save:.1f} MB 정리 예정",
+                    f"dedup: 중복 그룹 {len(dedup_groups)}개 / "
+                    f"삭제 예정 {n_dupes}개 / ≈ {mb_save:.1f} MB 회수 예정",
                     0.07,
                 )
             duplicate_paths = {
@@ -179,7 +191,11 @@ def run(
             ]
         else:
             if progress:
-                progress("dedup: 중복 파일 없음", 0.07)
+                progress(
+                    f"dedup: 임계값 {min_bytes / (1 << 20):.1f} MB 이상 "
+                    f"중복 파일 없음",
+                    0.07,
+                )
 
     client = None
     if not force_mock:

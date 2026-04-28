@@ -110,3 +110,36 @@ def test_planner_passes_seeds_to_rolling(tmp_path):
     ]
     p = Planner(Config(), seed_categories=seeds)
     assert p.seed_categories == seeds
+
+
+def test_report_includes_dedup_ledger(tmp_path):
+    """The markdown report must list every duplicate that was deleted,
+    along with its canonical and the bytes recovered — so the user can
+    audit the dedup pass instead of trusting a single summary line."""
+    from folderangel.models import (
+        Category, MovedFile, OperationResult, LLMUsage,
+    )
+    from folderangel.reporter import emit_markdown
+    op = OperationResult(
+        target_root=tmp_path,
+        started_at=datetime.now(tz=timezone.utc),
+        finished_at=datetime.now(tz=timezone.utc),
+        dry_run=False,
+        categories=[Category(id="c", name="문서")],
+        moved=[],
+        skipped=[],
+        total_scanned=3,
+    )
+    op.dupes_removed = [
+        ("/dl/old/movie.mp4", "/dl/movie.mp4", 50 * 1024 * 1024),
+        ("/dl/old/big.zip", "/dl/big.zip", 25 * 1024 * 1024),
+    ]
+    op.bytes_freed = 75 * 1024 * 1024
+    op.llm_usage = LLMUsage(model="mock")
+    out_path = emit_markdown(op, out_dir=tmp_path)
+    text = out_path.read_text(encoding="utf-8")
+    assert "## 중복 삭제 내역" in text
+    assert "/dl/old/movie.mp4" in text
+    assert "/dl/movie.mp4" in text
+    assert "50.0 MB" in text or "50 MB" in text
+    assert "75.0 MB" in text or "75 MB" in text

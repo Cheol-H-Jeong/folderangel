@@ -1162,23 +1162,55 @@ class SettingsView(QtWidgets.QWidget):
 
     def _on_preset_chosen(self, _idx: int):
         name = self.cmb_preset.currentData()
+        if name is None:
+            return
+        # User picked the placeholder "(저장되지 않음)" entry — clear
+        # the active preset but leave the form values alone.
         if not name:
+            self.config.active_preset = ""
+            save_config(self.config)
+            self.config_changed.emit()
+            self._refresh_status()
             return
         p = self._preset_by_name(name)
         if not p:
             return
-        # Replace flat fields with preset values; user can still edit
-        # them and re-save into the same preset via _save.
-        self.edit_base_url.setText((p.get("base_url") or "").strip())
-        model = (p.get("model") or "").strip()
-        if model:
-            if self.cmb_model.findText(model) < 0:
-                self.cmb_model.addItem(model)
-            self.cmb_model.setCurrentText(model)
+        # Replace flat fields with preset values …
+        new_url = (p.get("base_url") or "").strip()
+        new_model = (p.get("model") or "").strip()
+        new_provider = (p.get("llm_provider") or "").strip().lower()
+        new_reasoning = (p.get("reasoning_mode") or "off").strip().lower()
+        self.edit_base_url.setText(new_url)
+        if new_model:
+            if self.cmb_model.findText(new_model) < 0:
+                self.cmb_model.addItem(new_model)
+            self.cmb_model.setCurrentText(new_model)
+        # … and immediately persist them to the live Config + disk so
+        # the next pipeline run uses the new endpoint without the user
+        # having to also click "저장".  Past pain: switching from
+        # Gemini → Qwen via the dropdown changed the form fields but
+        # the next run still used Gemini because save_config wasn't
+        # called.
         self.config.active_preset = name
-        # Re-load the API key field for this preset's provider
-        # (provider is inferred from URL via existing helper).
+        if new_provider in ("gemini", "openai_compat"):
+            self.config.llm_provider = new_provider
+        else:
+            # Fall back to inference from URL (existing helper).
+            try:
+                self.config.llm_provider = self._current_provider()
+            except Exception:
+                pass
+        self.config.llm_base_url = new_url
+        self.config.model = new_model
+        self.config.reasoning_mode = new_reasoning or "off"
+        save_config(self.config)
+        # Don't write the actual API key into the masked input (would
+        # leak its length to onlookers).  The status line under the
+        # form already says "{provider} 키 저장됨" if a key exists for
+        # this preset's provider, so the user knows it'll be used.
+        self.edit_key.clear()
         self._refresh_status()
+        self.config_changed.emit()
 
     def _preset_add(self):
         name, ok = QtWidgets.QInputDialog.getText(
