@@ -141,14 +141,21 @@ def test_compose_folder_name_per_duration():
     mixed = Category(id="e", name="기타", group=9,
                      time_label="", duration="mixed")
 
-    assert compose_folder_name(burst)  == "2. 제안발표 (2024-03)"
-    assert compose_folder_name(short)  == "1. AVOCA (2024-Q3)"
-    assert compose_folder_name(annual) == "3. 연간 보고 (2024)"
+    # Every name now carries the FA signature suffix so we can
+    # detect "this is a folderangel folder" later.  The signature is
+    # 6 hex chars derived from the category id.
+    import re
+    fa = re.compile(r"\s\[FA·[a-f0-9]{4,12}\]$")
+    assert fa.search(compose_folder_name(burst))
+    assert compose_folder_name(burst).startswith("2. 제안발표 (2024-03)")
+    assert compose_folder_name(short).startswith("1. AVOCA (2024-Q3)")
+    assert compose_folder_name(annual).startswith("3. 연간 보고 (2024)")
     name_multi = compose_folder_name(multi)
     assert name_multi.startswith("1. 범정부 초거대 AI 공통기반")
-    # multi-year suffix uses angle quotes to make the span obvious
     assert "〈2023–2025〉" in name_multi
-    assert compose_folder_name(mixed) == "9. 기타"
+    assert fa.search(name_multi)
+    assert compose_folder_name(mixed).startswith("9. 기타")
+    assert fa.search(compose_folder_name(mixed))
 
 
 def test_existing_folder_with_same_core_name_is_reused(tmp_path):
@@ -164,9 +171,14 @@ def test_existing_folder_with_same_core_name_is_reused(tmp_path):
     assignments = [Assignment(file_path=new_file, primary_category_id="avoca", primary_score=0.9)]
     op = Organizer(Config()).execute(tmp_path, Plan(cats, assignments))
 
-    canonical = tmp_path / "1. AVOCA 시스템 (2024-Q3)"
-    assert canonical.is_dir()
+    # Folder name now carries the FA signature suffix.  Find it by
+    # the prefix and assert the legacy + new files both ended up
+    # inside.
+    matches = [d for d in tmp_path.iterdir() if d.is_dir()
+               and d.name.startswith("1. AVOCA 시스템 (2024-Q3)")]
+    assert matches, f"no folder matching prefix found in {list(tmp_path.iterdir())}"
+    canonical = matches[0]
+    assert "[FA·" in canonical.name
     assert (canonical / "old.pptx").exists()
     assert (canonical / "new.pptx").exists()
-    # Stats should reflect the absorbed leftover too.
     assert op.total_moved >= 2

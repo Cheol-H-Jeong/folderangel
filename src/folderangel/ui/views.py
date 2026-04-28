@@ -222,20 +222,32 @@ class OrganizeView(QtWidgets.QWidget):
             "기존 하위 폴더를 무시하고 처음부터 폴더 체계를 새로 만듭니다.\n"
             "처음 정리하는 폴더에 사용하세요."
         )
-        self.rad_inc = QtWidgets.QRadioButton("재분류 (기존 폴더에 추가)")
+        self.rad_inc = QtWidgets.QRadioButton("재분류 (기존 폴더 활용)")
         self.rad_inc.setToolTip(
-            "기존 최상위 폴더를 카테고리 목록으로 사용하고, 새로 들어온\n"
-            "파일만 거기에 분류합니다. 폴더엔젤로 이미 정리한 폴더에\n"
-            "새 파일을 부어 넣고 다시 돌릴 때 사용하세요."
+            "기존 최상위 폴더를 카테고리 목록으로 사용하고 모든 파일을\n"
+            "다시 분류합니다. 손으로 정리한 폴더 체계는 유지하면서 안의\n"
+            "내용을 한 번 더 다듬을 때 사용하세요."
+        )
+        self.rad_add = QtWidgets.QRadioButton("추가 분류 (FA 폴더 보존)")
+        self.rad_add.setToolTip(
+            "FolderAngel 가 만든 폴더는 그대로 두고, 새로 부어 넣은\n"
+            "파일만 그 폴더들에 추가하거나 필요시 새 폴더를 만듭니다.\n"
+            "이미 정리된 폴더에 새 파일만 쏟아 넣고 정리할 때 사용하세요."
         )
         current_mode = (getattr(self.config, "organize_mode", "new") or "new").lower()
-        self.rad_new.setChecked(current_mode != "incremental")
+        self.rad_new.setChecked(current_mode == "new")
         self.rad_inc.setChecked(current_mode == "incremental")
+        self.rad_add.setChecked(current_mode == "additive")
+        # Default to "new" if nothing matched.
+        if not (self.rad_new.isChecked() or self.rad_inc.isChecked() or self.rad_add.isChecked()):
+            self.rad_new.setChecked(True)
         mode_grp = QtWidgets.QButtonGroup(self)
         mode_grp.addButton(self.rad_new)
         mode_grp.addButton(self.rad_inc)
+        mode_grp.addButton(self.rad_add)
         mc.addWidget(self.rad_new)
         mc.addWidget(self.rad_inc)
+        mc.addWidget(self.rad_add)
         mc.addStretch(1)
         outer.addWidget(mode_card)
 
@@ -353,7 +365,12 @@ class OrganizeView(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "폴더 아님", "선택한 경로가 폴더가 아닙니다.")
             return
         self.set_running(True)
-        mode = "incremental" if self.rad_inc.isChecked() else "new"
+        if self.rad_add.isChecked():
+            mode = "additive"
+        elif self.rad_inc.isChecked():
+            mode = "incremental"
+        else:
+            mode = "new"
         self.start_requested.emit(
             path, self.chk_recursive.isChecked(),
             self.chk_dry.isChecked(), mode,

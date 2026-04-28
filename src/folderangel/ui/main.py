@@ -142,7 +142,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # picks it up.  ``incremental`` reuses existing top-level
         # folders as the category catalogue; ``new`` ignores them and
         # builds the catalogue from scratch.
-        self.config.organize_mode = mode if mode in ("new", "incremental") else "new"
+        self.config.organize_mode = (
+            mode if mode in ("new", "incremental", "additive") else "new"
+        )
         # Open a fresh per-run log file so every Organize run is captured
         # with full INFO/DEBUG and tracebacks.
         from ..runlog import start_session

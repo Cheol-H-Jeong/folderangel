@@ -129,26 +129,63 @@ def run(
     # treat that as the new "신규 분류" mode.
     # ------------------------------------------------------------------
     mode = (getattr(config, "organize_mode", "") or "").lower()
-    if mode not in ("new", "incremental"):
-        mode = "new" if getattr(config, "reclassify_mode", False) else "new"
-    # Both modes anonymise sub-folder paths in the prompt — the LLM
-    # decides categories from filename + content + (in incremental
-    # mode) the seed catalogue, never from broken or already-classified
-    # parent folder names.
+    if mode not in ("new", "incremental", "additive"):
+        mode = "new"
     config.reclassify_mode = True
 
-    # Incremental mode pre-seeds the rolling planner's catalogue from
-    # the existing top-level sub-folders of ``target_root``.  This
-    # forces the LLM to *re-use* those folders for new files instead
-    # of inventing parallel categories.
     seed_categories: list[dict] = []
     if mode == "incremental":
-        seed_categories = _seed_categories_from_disk(target_root)
+        # 재분류 — 기존 최상위 폴더 *전체* 를 카테고리로 활용.
+        seed_categories = _seed_categories_from_disk(target_root, fa_only=False)
         if progress:
             progress(
                 f"plan: 재분류 모드 — 기존 폴더 {len(seed_categories)}개를 카테고리로 활용",
                 0.06,
             )
+    elif mode == "additive":
+        # 추가 분류 — FolderAngel 가 만들어준 폴더만 카테고리로 활용.
+        # 그 안의 파일들은 이미 분류된 것으로 간주, 재분류 안 함.
+        # 외부에 떨어진 새 파일들만 FA 폴더(혹은 신규 폴더)로 보냄.
+        seed_categories = _seed_categories_from_disk(target_root, fa_only=True)
+        from .organizer import is_folderangel_folder_name
+        fa_paths: list[Path] = []
+        if target_root.is_dir():
+            for d in target_root.iterdir():
+                if d.is_dir() and is_folderangel_folder_name(d.name):
+                    fa_paths.append(d.resolve())
+        # Drop any entry whose absolute path lies inside an FA folder.
+        if fa_paths:
+            kept: list[FileEntry] = []
+            skipped_in_fa = 0
+            for e in entries:
+                try:
+                    rp = Path(e.path).resolve()
+                except OSError:
+                    rp = Path(e.path)
+                # Use string-prefix match — a child of an FA dir starts
+                # with its directory + os.sep.
+                if any(
+                    str(rp).startswith(str(fa) + ("/" if "/" in str(fa) else "\\"))
+                    or str(rp) == str(fa)
+                    for fa in fa_paths
+                ):
+                    skipped_in_fa += 1
+                    continue
+                kept.append(e)
+            entries = kept
+            if progress:
+                progress(
+                    f"plan: 추가 분류 — 기존 FA 폴더 {len(fa_paths)}개 / "
+                    f"이미 분류된 파일 {skipped_in_fa}개 건너뜀 / "
+                    f"새 분류 대상 {len(entries)}개",
+                    0.06,
+                )
+        else:
+            if progress:
+                progress(
+                    "plan: 추가 분류 — FA 시그니처 폴더가 없어 신규 분류처럼 동작",
+                    0.06,
+                )
 
     # ------------------------------------------------------------------
     # Duplicate detection: skip the LLM round-trip for non-canonical
@@ -319,17 +356,28 @@ def run(
     return op
 
 
-def _seed_categories_from_disk(target_root: Path) -> list[dict]:
+def _seed_categories_from_disk(
+    target_root: Path, *, fa_only: bool = False,
+) -> list[dict]:
     """Build a seed catalogue from the existing top-level folders of
-    ``target_root`` — used by the *재분류 (incremental)* mode so the
-    LLM places new files into folders the user already approved
-    instead of inventing parallel categories.
+    ``target_root``.
 
-    Naming convention recognised: "{n}. {name} 〈{period}〉" or
-    "{n}. {name} ({period})" or just plain "{name}".  We strip the
-    leading "{n}." sort prefix to keep the LLM-facing id stable.
+    ``fa_only=False`` (재분류): every readable sub-folder becomes a
+    seed category — convenient when the user has manually curated the
+    layout and only wants the LLM to place new files into existing
+    bins.
+
+    ``fa_only=True`` (추가 분류): only folders whose name carries the
+    ``[FA·xxxxxx]`` signature added by :func:`folder_signature` are
+    used.  Anything the user (or another tool) made by hand is left
+    out of the catalogue and its contents will be re-evaluated as
+    loose files.
     """
     import re
+    from .organizer import (
+        is_folderangel_folder_name,
+        parse_fa_folder_name,
+    )
     if not target_root.is_dir():
         return []
     seeds: list[dict] = []
@@ -339,16 +387,29 @@ def _seed_categories_from_disk(target_root: Path) -> list[dict]:
         if entry.name.startswith(".") or entry.name.startswith("__"):
             continue
         raw = entry.name
-        # Strip "1. " / "2-" / "3) " sort prefixes.
-        core = re.sub(r"^\s*\d+[\.\-_)\]\s]+", "", raw).strip()
-        # Pull out a trailing 〈2025-2026〉 / (2024) period if present.
-        m = re.search(r"[〈(]([^〉)]{1,30})[〉)]\s*$", core)
-        time_label = m.group(1).strip() if m else ""
-        if m:
-            core = core[:m.start()].strip()
+        if fa_only and not is_folderangel_folder_name(raw):
+            continue
+        parsed = parse_fa_folder_name(raw)
+        if parsed:
+            core = parsed["clean_name"] or raw
+            time_label = parsed["period"]
+            sig = parsed["signature"]
+        else:
+            # Strip "1. " / "2-" / "3) " sort prefixes.
+            core = re.sub(r"^\s*\d+[\.\-_)\]\s]+", "", raw).strip()
+            m = re.search(r"[〈(]([^〉)]{1,30})[〉)]\s*$", core)
+            time_label = m.group(1).strip() if m else ""
+            if m:
+                core = core[:m.start()].strip()
+            sig = ""
         slug = re.sub(r"[^A-Za-z0-9가-힣]+", "-", core).strip("-").lower()[:40]
         if not slug:
             slug = f"existing-{len(seeds)+1}"
+        # If we recovered a FA signature, prefer it as the slug suffix
+        # so a future signature() call regenerates the same tag and
+        # the folder is reused on disk instead of being created anew.
+        if sig:
+            slug = f"{slug}-{sig}"
         seeds.append({
             "id": slug,
             "name": core or raw,
@@ -356,7 +417,7 @@ def _seed_categories_from_disk(target_root: Path) -> list[dict]:
             "time_label": time_label,
             "duration": "mixed",
             "group": (len(seeds) % 8) + 1,
-            "_existing_folder": str(entry),  # informational
+            "_existing_folder": str(entry),
         })
     return seeds
 

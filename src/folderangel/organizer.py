@@ -98,6 +98,54 @@ _GROUP_PREFIX_RE = re.compile(r"^\s*(\d)\.\s+")
 _TIME_SUFFIX_RE = re.compile(r"\s*\([^()]+\)\s*$")
 
 
+def folder_signature(cat_id: str) -> str:
+    """Short stable tag appended to every folderangel-created folder
+    so we can later detect *exactly* which folders we made — used by
+    the additive-classify mode to leave existing FA folders untouched
+    and only sort *new* loose files into them.
+
+    Format: ``[FA·xxxxxx]`` — 6 hex chars from BLAKE2b of the
+    category id, deterministic across runs (same plan → same tag).
+    """
+    import hashlib
+    h = hashlib.blake2b((cat_id or "").encode("utf-8"), digest_size=4).hexdigest()
+    return f"[FA·{h[:6]}]"
+
+
+_FA_TAG_RE = re.compile(r"\[FA·([a-f0-9]{4,12})\]\s*$")
+
+
+def is_folderangel_folder_name(name: str) -> bool:
+    """Whether *name* looks like a folder we previously created."""
+    return bool(_FA_TAG_RE.search(name or ""))
+
+
+def parse_fa_folder_name(name: str) -> Optional[dict]:
+    """Return ``{"clean_name", "period", "signature"}`` for a name
+    that ends with the FA tag, else ``None``.
+
+    ``clean_name`` is the human-readable label with the leading group
+    prefix and the trailing FA tag stripped — it's what the planner
+    feeds back to the LLM as the category name.
+    """
+    if not name:
+        return None
+    m = _FA_TAG_RE.search(name)
+    if not m:
+        return None
+    sig = m.group(1)
+    core = name[: m.start()].rstrip()
+    # strip trailing period suffix "(2024-Q1)" or "〈2023–2025〉"
+    period = ""
+    pm = re.search(r"[\s]*[\(〈]([^)〉]{1,30})[\)〉]\s*$", core)
+    if pm:
+        period = pm.group(1).strip()
+        core = core[: pm.start()].rstrip()
+    # strip leading "1. " group prefix
+    core = re.sub(r"^\s*\d+[\.\-_)\s]+", "", core).strip()
+    return {"clean_name": core, "period": period, "signature": sig}
+
+
 def compose_folder_name(cat: Category, fallback_group: int = 9) -> str:
     """Build the on-disk folder name from a :class:`Category`.
 
@@ -136,7 +184,14 @@ def compose_folder_name(cat: Category, fallback_group: int = 9) -> str:
             pieces.append(f"〈{label}〉")
         else:
             pieces.append(f"({label})")
-    return sanitize_folder_name(" ".join(pieces))
+    # Sanitiser runs before the FA tag is appended — its anti-JSON
+    # filter would otherwise strip the trailing ``]`` of ``[FA·xxx]``
+    # because that bracket pattern looks like a stray JSON token.
+    base = sanitize_folder_name(" ".join(pieces))
+    sig = folder_signature(cat.id or cat.name or "")
+    # Cap the combined name to 120 chars too — leave room for the
+    # ~14-char signature suffix.
+    return f"{base[:120 - len(sig) - 1]} {sig}".strip()
 
 
 def _looks_multiyear(label: str) -> bool:
@@ -157,6 +212,7 @@ def _normalize_for_match(folder_name: str) -> str:
     """
     s = folder_name.strip()
     s = _GROUP_PREFIX_RE.sub("", s)
+    s = _FA_TAG_RE.sub("", s).strip()
     s = _TIME_SUFFIX_RE.sub("", s).strip()
     s = re.sub(r"\s+", " ", s)
     return s.casefold()

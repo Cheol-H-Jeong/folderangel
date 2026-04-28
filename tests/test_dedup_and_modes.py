@@ -201,3 +201,55 @@ def test_make_llm_client_allows_local_without_key():
     # Cloud URL with no key still falls to mock.
     cfg.llm_base_url = "https://api.openai.com/v1"
     assert make_llm_client(cfg, api_key=None) is None
+
+
+def test_folder_signature_round_trip():
+    """compose_folder_name → parse_fa_folder_name should recover the
+    clean name + period, and is_folderangel_folder_name must say yes."""
+    from folderangel.models import Category
+    from folderangel.organizer import (
+        compose_folder_name, is_folderangel_folder_name,
+        parse_fa_folder_name, folder_signature,
+    )
+    cat = Category(
+        id="drug-ai", name="의약품 AI 심사",
+        time_label="2025-2026", duration="multi-year", group=2,
+    )
+    name = compose_folder_name(cat)
+    assert is_folderangel_folder_name(name)
+    parsed = parse_fa_folder_name(name)
+    assert parsed is not None
+    assert parsed["clean_name"] == "의약품 AI 심사"
+    assert parsed["period"] == "2025-2026"
+    # Signature is deterministic from the category id.
+    assert parsed["signature"] in folder_signature("drug-ai")
+
+
+def test_folder_signature_reject_non_fa():
+    from folderangel.organizer import is_folderangel_folder_name, parse_fa_folder_name
+    assert not is_folderangel_folder_name("1. 일반 폴더")
+    assert not is_folderangel_folder_name("내가 손으로 만든 폴더")
+    assert parse_fa_folder_name("foo (2024)") is None
+
+
+def test_additive_mode_seeds_only_fa_folders(tmp_path):
+    """Additive mode's seed list must come from FA folders only —
+    user-created plain folders are NOT used as categories (their
+    contents will be reclassified as loose files)."""
+    from folderangel.pipeline import _seed_categories_from_disk
+    # FA folder
+    (tmp_path / "1. 의약품 AI 심사 〈2025-2026〉 [FA·a3b9c1]").mkdir()
+    # User-created plain folder
+    (tmp_path / "임시 작업 폴더").mkdir()
+    (tmp_path / "2. 손으로 만든 (2025)").mkdir()
+
+    fa_only = _seed_categories_from_disk(tmp_path, fa_only=True)
+    all_seeds = _seed_categories_from_disk(tmp_path, fa_only=False)
+    fa_names = {s["name"] for s in fa_only}
+    all_names = {s["name"] for s in all_seeds}
+
+    assert fa_names == {"의약품 AI 심사"}
+    assert all_names == {"의약품 AI 심사", "임시 작업 폴더", "손으로 만든"}
+    # FA seed retains its signature in the slug for stable reuse on
+    # next compose_folder_name call.
+    assert any(s["id"].endswith("-a3b9c1") for s in fa_only)
