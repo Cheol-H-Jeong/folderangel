@@ -738,6 +738,117 @@ def test_proper_noun_extraction_restricts_to_named_entities():
     assert "rtx" in pn and "gpu" in pn
 
 
+def test_similarity_module_signal_axes():
+    """Each of the 5 axes (S1 file core PN / S2 schema / S3 time /
+    S4 path / S5 body PN) must score independently — verify with
+    contrived inputs that the signal really fires."""
+    from datetime import date
+    from pathlib import Path
+    from folderangel import similarity as sim
+
+    # Two files with identical schemas (학생 발표자료 batch shape).
+    a = sim.signals_for_entry(_entry(
+        "김민지kimminji2031_197578_10350428_11주차_ AI 치매예방돌봄 로봇 다솜.pptx"
+    ))
+    b = sim.signals_for_entry(_entry(
+        "박규리parkgyuri2016_224614_10409047_소프트뱅크-softvoice.pptx"
+    ))
+    # Same student-batch schema → S2 should be high
+    assert sim._normalised_lev(a.schema, b.schema) > 0.6, (a.schema, b.schema)
+
+    # Filename-core noun stripping must remove the student-id block.
+    assert "kimminji" not in a.core_stem, a.core_stem
+    assert "11주차" in a.core_stem  # ← content survives
+
+    # Two files with same parent dir → S4 = 1.0
+    p_drug = Path("/x/의약품/file.pdf")
+    p_drug2 = Path("/x/의약품/another.pdf")
+
+    class _E:
+        def __init__(self, path):
+            self.path = path
+            self.name = path.name
+            self.content_excerpt = ""
+            from datetime import datetime as dt
+            self.modified = dt(2025, 11, 1)
+
+    sa = sim.signals_for_entry(_E(p_drug))
+    sb = sim.signals_for_entry(_E(p_drug2))
+    cat_sig = sim.category_signals(
+        {"name": "의약품 AI 심사", "description": "", "duration": "annual"},
+        members=[sa],
+    )
+    score = sim.s4_path(sb, cat_sig.parent_paths)
+    assert score == 1.0
+
+
+def test_filename_core_strips_student_id_block():
+    """The student-id-shaped prefix (`한글이름englishname2031_NNNNNN_NNNNNNNN_`)
+    must be stripped *before* proper-noun extraction, so the file's
+    *content* tokens (11주차, 로봇, 다솜) drive matching — not the
+    Latin transliteration of the student's name (kimminji), which
+    would otherwise tie the file to a hash bucket of arbitrary
+    other students' Latin tokens.
+    """
+    from folderangel.similarity import signals_for_entry, _strip_filename_for_core
+
+    sig = signals_for_entry(_entry(
+        "김민지kimminji2031_197578_10350428_11주차_ AI 치매예방돌봄 로봇 다솜.pptx"
+    ))
+    assert "kimminji" not in sig.core_stem
+    assert "197578" not in sig.core_stem
+    # Numeric prefix patterns: "1. 의약품…" must drop "1." too
+    assert _strip_filename_for_core("1. 의약품 AI 심사 제안서") == "의약품 AI 심사 제안서"
+    # Version / date / draft postfix
+    assert _strip_filename_for_core("범초공_제안서_v1.2_20251110_초안") in (
+        "범초공_제안서",
+        "범초공 제안서",
+        "범초공_제안서_20251110",  # accept either order of stripping
+    ) or _strip_filename_for_core("범초공_제안서_v1.2_20251110_초안").startswith("범초공_제안서")
+
+
+def test_compatibility_rejects_student_to_drug_ai():
+    """End-to-end: feed the user-reported student presentations and
+    the drug-AI category to ``similarity.compatibility`` and confirm
+    the score falls below ``THRESHOLD_GUESS_BY_TIME`` so the rescue
+    refuses the snap.  The 의약품 file goes the other way."""
+    from datetime import date
+    from folderangel.models import Category
+    from folderangel import similarity as sim
+
+    drug_cat = Category(
+        id="drug-ai",
+        name="의약품 AI 심사 및 산업지원 체계 구축",
+        description="의약품 AI 심사·산업지원 사업",
+        time_label="2025-2026",
+        duration="multi-year",
+        group=1,
+    )
+    cat_sig = sim.category_signals(drug_cat, time_range=(date(2025, 1, 1), date(2026, 12, 31)))
+
+    student_files = [
+        "김민지kimminji2031_197578_10350428_11주차_ AI 치매예방돌봄 로봇 다솜.pptx",
+        "조수빈chosubin2095_223631_10348706_로봇 공학_조수빈 2023038095.pptx",
+        "박규리parkgyuri2016_224614_10409047_소프트뱅크-softvoice.pptx",
+        "이서진leeseojin2066_224805_10418060_12 KT의 믿음_이서진.pptx",
+        "장윤성jangyoonsung2009_225560_10350506_로봇의 두뇌를 학습시키는 가상 세계, NVIDIA Isaac.pptx",
+    ]
+    for fname in student_files:
+        f_sig = sim.signals_for_entry(_entry(fname))
+        score = sim.compatibility(f_sig, cat_sig, reclassify_mode=True)
+        assert score < sim.THRESHOLD_GUESS_BY_TIME, (
+            f"student '{fname}' scored {score:.3f} ≥ rescue threshold "
+            f"{sim.THRESHOLD_GUESS_BY_TIME} — leak"
+        )
+
+    # Counter-example: real 의약품 file MUST clear the threshold.
+    f_sig = sim.signals_for_entry(_entry("의약품 AI 심사 제안서.pdf"))
+    score = sim.compatibility(f_sig, cat_sig, reclassify_mode=True)
+    assert score >= sim.THRESHOLD_GUESS_BY_TIME, (
+        f"의약품 file scored only {score:.3f}, expected ≥ rescue threshold"
+    )
+
+
 def test_tier_picker_picks_correct_tier():
     cfg = Config()
     # Use the production defaults so this test catches regressions to

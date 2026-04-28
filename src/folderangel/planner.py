@@ -76,41 +76,42 @@ def _parse_time_label_range(label: str):
     return None
 
 
-def _guess_by_time(entry, cats):
+def _guess_by_time(entry, cats, *, members_by_cat=None, reclassify_mode=False):
     """Pick the project category whose time-window covers the file's
-    modified date *and* whose **proper-noun set** overlaps the file's
-    filename + excerpt proper-noun set.  Returns the category id, or
-    ``None`` if nothing matches (the caller falls back to misc).
+    modified date AND whose multi-axis compatibility with the file
+    clears :data:`similarity.THRESHOLD_GUESS_BY_TIME`.
 
-    The proper-noun requirement is critical for correctness: a
-    bag-of-tokens overlap lets a file like
-    ``김민지..._AI 치매예방돌봄 로봇 다솜.pptx`` pass into the
-    ``의약품 AI 심사`` category on the strength of the bare ``AI``
-    overlap, or into a 행안부-themed category on the strength of a
-    generic ``지원``/``운영``/``체계`` NNG overlap.  Restricting the
-    overlap check to NNP (proper noun) + SL≥3 (Latin word, e.g.
-    ``RTX``/``NIPA``/``Isaac``) + SH (Hanja word) eliminates that
-    class of leak while still letting genuine project markers
-    (``한양대``/``범정부``/``소프트뱅크``/``NIPA``) drive the rescue.
+    The composite score (S1 filename-core proper-noun Jaccard, S2
+    filename-schema similarity, S3 time proximity, S4 path
+    co-residence, S5 body-head proper-noun Jaccard) replaces the
+    previous bare-set-overlap check.  S4 is forced to 0 in re-classify
+    mode so the rescue does not re-anchor on the layout the user is
+    escaping.
 
-    Only project-style categories are considered — anything tagged as
-    the catch-all ``misc`` is excluded.  When several windows match,
-    the *narrowest* (shortest span in days) wins, since burst /
-    short-period buckets are stronger evidence than a multi-year
-    umbrella programme.
+    ``members_by_cat`` is an optional ``{cat_id: list[Signals]}`` map
+    of files already assigned by upstream stages, used to compute S2
+    (schema sim against existing members) and S5 / S1 (proper-noun
+    Jaccard against the union of member nouns).  When omitted, only
+    the category's name/description proper-nouns drive S1/S5.
+
+    When several categories pass the threshold, the *highest-score*
+    one wins (with narrower time windows acting as a tiebreaker).
     """
+    from . import similarity as _sim
+
     try:
-        d = entry.modified.date()
+        _ = entry.modified.date()
     except Exception:
         return None
-    file_pn = _proper_nouns_for_entry(entry)
-    if not file_pn:
-        # No proper-noun anchor in the file — refuse to guess.  The
-        # caller falls back to 기타, which is the safe answer for
-        # opaque/identity-less files.
+
+    file_sig = _sim.signals_for_entry(entry)
+    if not file_sig.name_pn and not file_sig.body_pn:
+        # No identity anchor at all → refuse to guess.
         return None
-    best = None
-    best_span = None
+
+    best_cid: Optional[str] = None
+    best_score = -1.0
+    best_span: Optional[int] = None
     for c in cats:
         if c.id == "misc":
             continue
@@ -118,16 +119,25 @@ def _guess_by_time(entry, cats):
         if rng is None:
             continue
         start, end = rng
-        if not (start <= d <= end):
+        if not (start <= file_sig.modified <= end):
             continue
-        cat_pn = _proper_nouns_for_category(c)
-        if not (file_pn & cat_pn):
+        members = (members_by_cat or {}).get(c.id, [])
+        cat_sig = _sim.category_signals(c, members=members, time_range=rng)
+        score = _sim.compatibility(
+            file_sig, cat_sig, reclassify_mode=reclassify_mode
+        )
+        if score < _sim.THRESHOLD_GUESS_BY_TIME:
             continue
         span = (end - start).days
-        if best is None or span < best_span:
-            best = c.id
+        # Pick max score; on tie, prefer narrower window (burst > multi-year).
+        if (
+            score > best_score + 1e-6
+            or (abs(score - best_score) <= 1e-6 and (best_span is None or span < best_span))
+        ):
+            best_cid = c.id
+            best_score = score
             best_span = span
-    return best
+    return best_cid
 
 
 def _doc_for_cluster_member(entry: FileEntry) -> str:
@@ -327,6 +337,17 @@ def _proper_nouns_for_entry(entry) -> frozenset[str]:
     excerpt = (getattr(entry, "content_excerpt", "") or "")[:1200]
     text = f"{name}\n{excerpt}".strip()
     return _proper_noun_tokens(text)
+
+
+def cat_sig_names_substantive(category) -> bool:
+    """A brand-new LLM-proposed category is acceptable as a target
+    for its very first member iff its name carries at least one
+    substantive identifier — a category named only with abstract
+    labels ("문서"/"보고서"/"기타") fails this check and the file
+    gets deferred regardless of LLM confidence.
+    """
+    pn = _proper_nouns_for_category(category)
+    return bool(pn)
 
 
 def _proper_nouns_for_category(category) -> frozenset[str]:
@@ -607,7 +628,7 @@ class Planner:
                 progress(self._tier_announcement(tier, len(entries)), 0.16)
                 progress("mock-planner: API 키 없음 — 휴리스틱으로 분류합니다.", 0.5)
             plan_dict = mock_planner.plan(payloads, self.config.ambiguity_threshold)
-            return _plan_from_dict(plan_dict, entries)
+            return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
 
         # ------------------------------------------------------------------
         # Tiered planning policy — choose the cheapest path that still
@@ -671,6 +692,7 @@ class Planner:
                     return _plan_from_dict(
                         {"categories": seed_cats, "assignments": seed_assigns},
                         entries,
+                        reclassify_mode=anonymise,
                     )
                 if progress:
                     progress(
@@ -701,6 +723,7 @@ class Planner:
                 return _plan_from_dict(
                     {"categories": merged_cats, "assignments": merged_assigns},
                     entries,
+                    reclassify_mode=anonymise,
                 )
 
         if tier == "large":
@@ -711,7 +734,7 @@ class Planner:
                         0.2,
                     )
                 plan_dict = self._hierarchical_plan(entries, progress)
-                return _plan_from_dict(plan_dict, entries)
+                return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
             except Exception as exc:
                 log.warning("hierarchical plan failed; falling through: %s", exc)
 
@@ -732,7 +755,7 @@ class Planner:
                 if progress:
                     progress("plan: micro-batch 모드 (컨텍스트 초과 분할)…", 0.2)
                 plan_dict = self._microbatch_plan(payloads, progress)
-                return _plan_from_dict(plan_dict, entries)
+                return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
             except Exception as exc:
                 log.warning("micro-batch plan failed; falling back: %s", exc)
                 # Fall through to economy or the legacy two-stage path.
@@ -748,7 +771,7 @@ class Planner:
                 if progress:
                     progress("plan", 0.2)
                 plan_dict = self._single_call_plan(payloads, progress)
-                return _plan_from_dict(plan_dict, entries)
+                return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
             except Exception as exc:
                 log.warning("economy single-call plan failed; falling back: %s", exc)
                 # Fall through to the original two-stage path on hard failure.
@@ -838,7 +861,7 @@ class Planner:
 
         # Build the final Plan, coercing unknown ids to the best available fallback.
         plan_dict = {"categories": categories_payload, "assignments": assignments_raw}
-        return _plan_from_dict(plan_dict, entries)
+        return _plan_from_dict(plan_dict, entries, reclassify_mode=anonymise)
 
 
     # ------------------------------------------------------------------
@@ -1484,6 +1507,10 @@ class Planner:
         agg_assigns: list[dict] = []
         agg_deferred: list[str] = list(forced_deferred)
         seen_cat_ids: set[str] = set()
+        # Path → FileEntry index, needed by the multi-axis veto so it
+        # can reach modified date / body excerpt / parent path for S2/
+        # S3/S4/S5 inputs.
+        entry_by_path: dict[str, FileEntry] = {str(e.path): e for e in entries}
         for idx, chunk in enumerate(chunks, 1):
             prompt = prompts.build_filename_first_pass(
                 chunk,
@@ -1521,30 +1548,42 @@ class Planner:
                         continue
                     agg_cats.append(c)
                     seen_cat_ids.add(cid)
-            # Build a {category_id: token-set} index from this chunk's
-            # categories AND every category we've seen so far.  The
-            # keyword-overlap veto runs against this index so an
-            # assignment is only kept when the filename shares at
-            # least one substantive token with its target category.
-            cat_tokens_by_id: dict[str, set[str]] = {}
+            # Build per-category cached signal payloads + the running
+            # member-Signals index so the multi-axis compatibility
+            # score has S1 / S2 / S5 inputs ready.
+            from . import similarity as _sim
             cat_by_id: dict[str, dict] = {}
             for c in agg_cats:
                 cid = (c.get("id") or "").strip()
                 if not cid:
                     continue
                 cat_by_id[cid] = c
-                cat_tokens_by_id[cid] = _category_tokens(c)
-            # Match payloads to their original name so we can score
-            # the overlap.  ``chunk`` is the slim-payload list for
-            # this iteration; build path → name AND basename → name
-            # so an LLM that rewrites the anonymised path back can
-            # still be matched.
+            # Members so far in this chunk's chunk + earlier chunks
+            # (already-vetted assignments only).
+            members_by_cat: dict[str, list] = {}
+            for prev in agg_assigns:
+                pcid = (prev.get("primary") or "").strip()
+                ppath = prev.get("path") or ""
+                if not pcid or not ppath:
+                    continue
+                pe = entry_by_path.get(ppath)
+                if pe is None:
+                    continue
+                members_by_cat.setdefault(pcid, []).append(
+                    _sim.signals_for_entry(pe)
+                )
+            # Match payloads to their original FileEntry / name so we
+            # can score the multi-axis compatibility.
+            entry_by_chunk_path: dict[str, "FileEntry"] = {}
             name_by_key: dict[str, str] = {}
             for d in chunk:
                 p = d.get("path") or ""
                 n = d.get("name") or ""
                 if p:
                     name_by_key[p] = n
+                    pe = entry_by_path.get(p)
+                    if pe is not None:
+                        entry_by_chunk_path[p] = pe
                 if n:
                     name_by_key[n] = n
                     name_by_key[Path(p).name] = n if p else name_by_key.get(n, n)
@@ -1552,31 +1591,48 @@ class Planner:
                 for a in assigns:
                     p = str(a.get("path") or "")
                     cid = (a.get("primary") or "").strip()
-                    fname = (
-                        name_by_key.get(p)
-                        or name_by_key.get(Path(p).name)
-                        or ""
-                    )
-                    cat_toks = cat_tokens_by_id.get(cid, set())
-                    file_toks = _filename_tokens(fname) if fname else set()
-                    overlap = _tokens_overlap(file_toks, cat_toks)
+                    e_for_score = entry_by_chunk_path.get(p) or entry_by_path.get(p)
                     score = float(a.get("primary_score") or 0.0)
-                    if not cid or not cat_toks or not file_toks or not overlap:
-                        # Veto: no token overlap (or no category found
-                        # in catalogue yet).  Force this file into the
-                        # deferred bag — body content will get a fair
-                        # second look in Pass 2.
+                    if not cid or cid not in cat_by_id or e_for_score is None:
                         if p:
                             agg_deferred.append(p)
                         continue
+                    file_sig = _sim.signals_for_entry(e_for_score)
+                    existing_members = members_by_cat.get(cid, [])
+                    if existing_members:
+                        # ≥ 1 sibling already pinned to this category —
+                        # require multi-axis compatibility against the
+                        # ESTABLISHED set so the second file in
+                        # "ProjectX" has to look like the first one.
+                        cat_sig = _sim.category_signals(
+                            cat_by_id[cid], members=existing_members,
+                        )
+                        compat = _sim.compatibility(
+                            file_sig, cat_sig, reclassify_mode=True,
+                        )
+                        if compat < _sim.THRESHOLD_FILENAME_VETO:
+                            if p:
+                                agg_deferred.append(p)
+                            continue
+                    else:
+                        # First file in a brand-new category just proposed
+                        # by the LLM in this same chunk.  We have no
+                        # established member set to score against, so we
+                        # defer the veto to the LLM's own confidence —
+                        # a high primary_score plus a non-trivial
+                        # category-name PN is enough.
+                        if not cat_sig_names_substantive(cat_by_id[cid]):
+                            if p:
+                                agg_deferred.append(p)
+                            continue
                     if score and score < 0.7:
-                        # LLM itself flagged low confidence — defer.
                         if p:
                             agg_deferred.append(p)
                         continue
                     a.setdefault("reason", "")
                     a["reason"] = (a.get("reason") or "") + " · 파일명 패스"
                     agg_assigns.append(a)
+                    members_by_cat.setdefault(cid, []).append(file_sig)
             if isinstance(deferred, list):
                 agg_deferred.extend(str(p) for p in deferred if p)
 
@@ -1776,7 +1832,12 @@ def _closest_category(unknown_id: str, categories: list[dict]) -> str:
     return categories[0]["id"]
 
 
-def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
+def _plan_from_dict(
+    data: dict,
+    entries: list[FileEntry],
+    *,
+    reclassify_mode: bool = False,
+) -> Plan:
     by_path = {str(e.path): e for e in entries}
     from .llm.client import _looks_like_mojibake, _try_repair_mojibake
 
@@ -1902,6 +1963,24 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
             )
         )
 
+    # Build a {cat_id → list[Signals]} index of files the LLM already
+    # assigned with confidence (primary != misc).  ``_guess_by_time``
+    # uses these as cluster members for S2 (schema sim) and S5 (body
+    # PN) — which is how a 학생 발표자료 that has no clear project
+    # name still finds its way to the right student/lecture folder
+    # if the LLM placed enough sibling files there.
+    from . import similarity as _sim
+    members_by_cat: dict[str, list] = {}
+    for a in assignments:
+        if a.primary_category_id == "misc":
+            continue
+        e = by_path.get(str(a.file_path))
+        if e is None:
+            continue
+        members_by_cat.setdefault(a.primary_category_id, []).append(
+            _sim.signals_for_entry(e)
+        )
+
     # Ensure every entry has an assignment.  For misses (or assignments
     # the LLM dropped to "misc") we make a *project-time* attempt first:
     # if a project category's time_label range contains the file's
@@ -1911,7 +1990,11 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
     for entry in entries:
         if entry.path in covered_paths:
             continue
-        guess = _guess_by_time(entry, cats)
+        guess = _guess_by_time(
+            entry, cats,
+            members_by_cat=members_by_cat,
+            reclassify_mode=reclassify_mode,
+        )
         if guess is not None:
             assignments.append(
                 Assignment(
@@ -1943,7 +2026,11 @@ def _plan_from_dict(data: dict, entries: list[FileEntry]) -> Plan:
         entry = by_path.get(str(a.file_path))
         if entry is None:
             continue
-        guess = _guess_by_time(entry, cats)
+        guess = _guess_by_time(
+            entry, cats,
+            members_by_cat=members_by_cat,
+            reclassify_mode=reclassify_mode,
+        )
         if guess is not None and guess != "misc":
             a.primary_category_id = guess
             a.primary_score = max(a.primary_score, 0.45)
