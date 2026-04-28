@@ -172,16 +172,31 @@ class GeminiClient:
         temperature: float = 0.2,
         heartbeat: Optional[Callable[[float], None]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        stream_text: Optional[Callable[[str, int], None]] = None,
     ) -> dict[str, Any]:
         """Send *prompt* to Gemini and parse the JSON reply.
 
-        ``heartbeat`` is called from a background thread roughly once a
-        second with the elapsed seconds while the HTTP call is in flight.
-        Use it to keep a UI progress log moving so users don't think the
-        app is hung when a single long inference is running.
+        ``heartbeat`` ticks roughly once a second with the elapsed
+        seconds while the HTTP call is in flight.  ``stream_text`` is
+        invoked with ``(chunk_text, total_chars)`` for each
+        ``streamGenerateContent`` SSE chunk so the UI can show a live
+        token preview — without it, large requests look frozen for
+        the entire generation duration.
         """
-        url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
-        params = {"key": self.api_key}
+        # Streaming endpoint: ``streamGenerateContent`` returns SSE
+        # events whose ``data:`` payloads each carry an incremental
+        # ``GenerateContentResponse``.  Falling back to the non-stream
+        # ``generateContent`` only when ``stream_text`` is None keeps
+        # one code path for callers who need the live preview.
+        if stream_text is not None:
+            url = (
+                f"{self.base_url.rstrip('/')}/models/"
+                f"{self.model}:streamGenerateContent"
+            )
+            params = {"key": self.api_key, "alt": "sse"}
+        else:
+            url = f"{self.base_url.rstrip('/')}/models/{self.model}:generateContent"
+            params = {"key": self.api_key}
         headers = {"Content-Type": "application/json"}
         body = {
             "contents": [
@@ -225,15 +240,16 @@ class GeminiClient:
                 beat_thread = threading.Thread(target=_beat, daemon=True)
                 beat_thread.start()
             try:
+                use_stream = stream_text is not None
                 resp = requests.post(
                     url,
                     params=params,
                     headers=headers,
                     json=body,
                     timeout=(15.0, current_timeout),  # (connect, read)
+                    stream=use_stream,
                 )
                 if resp.status_code >= 400:
-                    # Retry on transient 429 / 5xx; otherwise fail fast.
                     if resp.status_code in (429, 500, 502, 503, 504):
                         raise LLMError(
                             f"gemini transient http {resp.status_code}: {resp.text[:200]}"
@@ -241,8 +257,11 @@ class GeminiClient:
                     raise LLMError(
                         f"gemini http {resp.status_code}: {resp.text[:300]}"
                     )
-                data = resp.json()
-                text = _extract_text(data)
+                if use_stream:
+                    text = _consume_gemini_sse(resp, cancel_check, stream_text)
+                else:
+                    data = resp.json()
+                    text = _extract_text(data)
                 duration = time.monotonic() - start_ts
                 self.request_count += 1
                 self.response_chars += len(text)
@@ -303,6 +322,57 @@ def _extract_text(response: dict) -> str:
         return "".join(p.get("text", "") for p in parts)
     except (KeyError, IndexError, TypeError) as exc:
         raise LLMError(f"unexpected gemini response shape: {exc}") from exc
+
+
+def _consume_gemini_sse(resp, cancel_check, stream_text) -> str:
+    """Read a ``streamGenerateContent`` SSE stream, accumulate the
+    response text, and emit each delta chunk to ``stream_text`` so the
+    UI can render a live token preview.
+
+    Each SSE event has the shape::
+
+        data: {"candidates":[{"content":{"parts":[{"text":"…"}]}}]}\n\n
+
+    The accumulated text — joined across all parts of all events — is
+    parsed by the caller as JSON.  ``stream_text(chunk, total_chars)``
+    fires once per parsed event with the freshly-arrived text only.
+    """
+    accumulated_chars = 0
+    pieces: list[str] = []
+    for raw in resp.iter_lines(decode_unicode=False):
+        if cancel_check is not None and cancel_check():
+            raise LLMError("canceled by user")
+        if not raw:
+            continue
+        try:
+            line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        except UnicodeDecodeError:
+            line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        try:
+            for cand in event.get("candidates") or []:
+                content = cand.get("content") or {}
+                for part in content.get("parts") or []:
+                    txt = part.get("text") or ""
+                    if not txt:
+                        continue
+                    pieces.append(txt)
+                    accumulated_chars += len(txt)
+                    try:
+                        stream_text(txt, accumulated_chars)
+                    except Exception:
+                        pass
+        except (KeyError, TypeError, AttributeError):
+            continue
+    return "".join(pieces)
 
 
 def _strip_code_fence(text: str) -> str:

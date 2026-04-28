@@ -184,3 +184,32 @@ def test_record_operation_persists_report_path(tmp_path):
     ops = db.list_operations()
     assert ops and ops[0].report_path == str(rp)
     db.close()
+
+
+def test_config_preset_round_trips_through_save_load(tmp_path, monkeypatch):
+    """Adding a preset, saving config, reloading it must keep the
+    preset list intact — covers the JSON serialisation path."""
+    from folderangel.config import Config, load_config, save_config, AppPaths
+    paths = AppPaths(
+        root=tmp_path,
+        config=tmp_path / "config.json",
+        index_db=tmp_path / "idx.db",
+        logs_dir=tmp_path / "logs",
+    )
+    paths.ensure()
+    cfg = Config()
+    cfg.llm_presets = [
+        {"name": "회사 Gemini", "llm_provider": "gemini",
+         "base_url": "", "model": "gemini-2.5-flash", "reasoning_mode": "off"},
+        {"name": "로컬 Ollama", "llm_provider": "openai_compat",
+         "base_url": "http://localhost:11434/v1", "model": "qwen2.5",
+         "reasoning_mode": "off"},
+    ]
+    cfg.active_preset = "로컬 Ollama"
+    save_config(cfg, paths)
+    loaded = load_config(paths)
+    assert loaded.active_preset == "로컬 Ollama"
+    names = {p["name"] for p in loaded.llm_presets}
+    assert names == {"회사 Gemini", "로컬 Ollama"}
+    by_name = {p["name"]: p for p in loaded.llm_presets}
+    assert by_name["로컬 Ollama"]["base_url"] == "http://localhost:11434/v1"

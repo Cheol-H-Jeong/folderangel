@@ -781,8 +781,37 @@ class SettingsView(QtWidgets.QWidget):
         c1_sub.setStyleSheet("color:#6e6e73;font-size:12px;")
         c1.addWidget(c1_sub)
 
+        # 0) Preset selector — register multiple endpoint setups
+        # ("회사 Gemini", "로컬 Ollama", "OpenRouter Claude" …) and
+        # switch between them.  Selecting a preset replaces the URL /
+        # model fields below in one click.
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.setContentsMargins(0, 0, 0, 0)
+        preset_row.setSpacing(6)
+        self.cmb_preset = QtWidgets.QComboBox()
+        self.cmb_preset.setMinimumWidth(200)
+        self._populate_preset_combo()
+        self.cmb_preset.currentIndexChanged.connect(self._on_preset_chosen)
+        preset_row.addWidget(self.cmb_preset, 1)
+        btn_preset_add = QtWidgets.QPushButton("＋ 추가")
+        btn_preset_add.setObjectName("Ghost")
+        btn_preset_add.clicked.connect(self._preset_add)
+        btn_preset_rename = QtWidgets.QPushButton("이름 변경")
+        btn_preset_rename.setObjectName("Ghost")
+        btn_preset_rename.clicked.connect(self._preset_rename)
+        btn_preset_delete = QtWidgets.QPushButton("삭제")
+        btn_preset_delete.setObjectName("Ghost")
+        btn_preset_delete.clicked.connect(self._preset_delete)
+        preset_row.addWidget(btn_preset_add)
+        preset_row.addWidget(btn_preset_rename)
+        preset_row.addWidget(btn_preset_delete)
+
+        preset_wrap = QtWidgets.QWidget()
+        preset_wrap.setLayout(preset_row)
+
         f1 = QtWidgets.QFormLayout()
         f1.setSpacing(10)
+        f1.addRow("프리셋", preset_wrap)
 
         # 1) Endpoint URL
         self.edit_base_url = QtWidgets.QLineEdit()
@@ -1064,6 +1093,135 @@ class SettingsView(QtWidgets.QWidget):
         self.config_changed.emit()
 
     # ------------------------------------------------------------------
+    # Preset management
+    # ------------------------------------------------------------------
+    def _populate_preset_combo(self):
+        self.cmb_preset.blockSignals(True)
+        self.cmb_preset.clear()
+        self.cmb_preset.addItem("(저장되지 않음)", userData="")
+        active = (self.config.active_preset or "").strip()
+        for p in (self.config.llm_presets or []):
+            name = p.get("name") if isinstance(p, dict) else None
+            if not name:
+                continue
+            self.cmb_preset.addItem(name, userData=name)
+        # restore selection
+        idx = self.cmb_preset.findData(active)
+        self.cmb_preset.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_preset.blockSignals(False)
+
+    def _preset_by_name(self, name: str):
+        for p in (self.config.llm_presets or []):
+            if isinstance(p, dict) and p.get("name") == name:
+                return p
+        return None
+
+    def _on_preset_chosen(self, _idx: int):
+        name = self.cmb_preset.currentData()
+        if not name:
+            return
+        p = self._preset_by_name(name)
+        if not p:
+            return
+        # Replace flat fields with preset values; user can still edit
+        # them and re-save into the same preset via _save.
+        self.edit_base_url.setText((p.get("base_url") or "").strip())
+        model = (p.get("model") or "").strip()
+        if model:
+            if self.cmb_model.findText(model) < 0:
+                self.cmb_model.addItem(model)
+            self.cmb_model.setCurrentText(model)
+        self.config.active_preset = name
+        # Re-load the API key field for this preset's provider
+        # (provider is inferred from URL via existing helper).
+        self._refresh_status()
+
+    def _preset_add(self):
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "프리셋 추가",
+            "이름:\n(현재 화면의 URL · 모델 · 키가 이 이름으로 저장됩니다)"
+        )
+        if not ok or not (name := name.strip()):
+            return
+        if self._preset_by_name(name) is not None:
+            QtWidgets.QMessageBox.warning(
+                self, "이미 있음", f"'{name}' 프리셋이 이미 존재합니다."
+            )
+            return
+        self.config.llm_presets = list(self.config.llm_presets or [])
+        self.config.llm_presets.append({
+            "name": name,
+            "llm_provider": self._current_provider(),
+            "base_url": self.edit_base_url.text().strip(),
+            "model": self.cmb_model.currentText().strip(),
+            "reasoning_mode": "off",
+        })
+        self.config.active_preset = name
+        save_config(self.config)
+        self._populate_preset_combo()
+
+    def _preset_rename(self):
+        name = self.cmb_preset.currentData()
+        if not name:
+            QtWidgets.QMessageBox.information(
+                self, "프리셋 없음", "이름을 변경할 프리셋을 먼저 선택하세요."
+            )
+            return
+        new_name, ok = QtWidgets.QInputDialog.getText(
+            self, "이름 변경", "새 이름:", text=name
+        )
+        if not ok or not (new_name := new_name.strip()) or new_name == name:
+            return
+        if self._preset_by_name(new_name) is not None:
+            QtWidgets.QMessageBox.warning(
+                self, "이미 있음", f"'{new_name}' 프리셋이 이미 존재합니다."
+            )
+            return
+        for p in (self.config.llm_presets or []):
+            if isinstance(p, dict) and p.get("name") == name:
+                p["name"] = new_name
+                break
+        if self.config.active_preset == name:
+            self.config.active_preset = new_name
+        save_config(self.config)
+        self._populate_preset_combo()
+
+    def _preset_delete(self):
+        name = self.cmb_preset.currentData()
+        if not name:
+            return
+        resp = QtWidgets.QMessageBox.question(
+            self, "프리셋 삭제",
+            f"프리셋 '{name}' 을 삭제할까요?\n"
+            "(URL · 모델 설정만 사라지고 API 키는 keyring 에 그대로 남습니다.)",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        if resp != QtWidgets.QMessageBox.Yes:
+            return
+        self.config.llm_presets = [
+            p for p in (self.config.llm_presets or [])
+            if not (isinstance(p, dict) and p.get("name") == name)
+        ]
+        if self.config.active_preset == name:
+            self.config.active_preset = ""
+        save_config(self.config)
+        self._populate_preset_combo()
+
+    def _save_active_preset_snapshot(self):
+        """Update the currently-active preset to match the freshly-saved
+        flat fields, so editing & re-saving a preset isn't lost."""
+        name = (self.config.active_preset or "").strip()
+        if not name:
+            return
+        for p in (self.config.llm_presets or []):
+            if isinstance(p, dict) and p.get("name") == name:
+                p["llm_provider"] = self.config.llm_provider
+                p["base_url"] = self.config.llm_base_url
+                p["model"] = self.config.model
+                p["reasoning_mode"] = self.config.reasoning_mode
+                return
+
+    # ------------------------------------------------------------------
     def _save(self):
         provider = self._current_provider()
         self.config.llm_provider = provider
@@ -1087,6 +1245,9 @@ class SettingsView(QtWidgets.QWidget):
         # OpenAICompatClient — no user knob.  Keep the saved value at
         # "off" so any persisted older state can't surprise.
         self.config.reasoning_mode = "off"
+        # Mirror the saved flat fields back into the active preset so a
+        # round-trip "select preset → edit → save" updates that preset.
+        self._save_active_preset_snapshot()
         save_config(self.config)
         self.config_changed.emit()
         show_toast_dialog(

@@ -129,6 +129,16 @@ class Config:
             "openai_compat": {"base_url": "", "model": "gpt-4o-mini"},
         }
     )
+    # Named LLM presets — the user's most-recently-saved (provider,
+    # base_url, model, reasoning_mode) snapshots.  Switching presets in
+    # Settings restores all four fields at once.  An API key is stored
+    # per *provider* in the OS keyring, so two presets that share a
+    # provider share the key (usually what the user wants); presets on
+    # different providers each have their own key.
+    llm_presets: list = field(default_factory=list)
+    # Name of the currently-active preset.  Empty string = freeform
+    # (matches the flat fields above without belonging to any preset).
+    active_preset: str = ""
     batch_size: int = 30
     max_files: int = 5000
     min_categories: int = 3

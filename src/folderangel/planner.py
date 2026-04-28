@@ -580,28 +580,44 @@ class Planner:
         # "{label} … N초 경과".  This is the difference between "looks
         # frozen" and "I can see it's actually generating".
         def _wrapped_heartbeat(elapsed_s: float):
-            if heartbeat is None:
-                return
             chars = stream_state["chars"]
             ttft = (
                 stream_state["first_token_ts"] - stream_state["start_ts"]
                 if stream_state["first_token_ts"] else 0.0
             )
+            if progress is None:
+                if heartbeat is not None:
+                    heartbeat(elapsed_s)
+                return
             if chars > 0:
                 # Streaming is live — push a status line every heartbeat
                 # tick that includes the running count.
-                if progress is not None:
-                    rate = chars / elapsed_s if elapsed_s > 0.5 else 0.0
-                    progress(
-                        f"{stream_label}: {elapsed_s:.0f}초 / {chars}자 수신 / "
-                        f"TTFT {ttft:.1f}초 / {rate:.0f}자·s",
-                        -1.0,
-                    )
+                rate = chars / elapsed_s if elapsed_s > 0.5 else 0.0
+                progress(
+                    f"{stream_label}: {elapsed_s:.0f}초 / {chars}자 수신 / "
+                    f"TTFT {ttft:.1f}초 / {rate:.0f}자·s",
+                    -1.0,
+                )
             else:
-                # Pre-first-token — fall back to the original heartbeat
-                # so the user at least sees "still waiting".
-                heartbeat(elapsed_s)
+                # Pre-first-token: emit an explicit "waiting" status so
+                # the user knows the network call is in flight but the
+                # model hasn't started speaking yet.  This is what looks
+                # like a hang to the user — calling it out by name
+                # ("첫 토큰 대기") changes the perceived state from
+                # "frozen" to "polite waiting".
+                hint = (
+                    " — 모델이 응답을 준비 중 (대형 프롬프트일수록 길어집니다)"
+                    if elapsed_s > 10 else ""
+                )
+                progress(
+                    f"{stream_label}: {elapsed_s:.0f}초 경과 / 첫 토큰 대기 중{hint}",
+                    -1.0,
+                )
 
+        # Both the native Gemini client and the OpenAI-compat client now
+        # support stream_text — try the full call signature first.  The
+        # TypeError fallback chain below covers older / mocked clients
+        # (test fakes, etc.) that may not accept all the kwargs.
         try:
             return self.gemini.generate_json(
                 prompt,
