@@ -4,7 +4,7 @@ Two backends, picked automatically:
 
   Tier 1 — TF-IDF (default).  ``scikit-learn`` is a small, well-tested
            dependency that ships pre-built wheels for every OS we
-           target.  Tokenisation reuses ``folderangel.morph`` so
+           target.  Tokenisation reuses ``folder1004.morph`` so
            Korean compound nouns + Latin brand tokens are first-class.
            Deterministic, fast, no model download.
 

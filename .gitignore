@@ -16,19 +16,23 @@ env/
 .idea/
 .vscode/
 *.spec
+!scripts/folder1004.spec
 *.db
 .DS_Store
 Thumbs.db
-FolderAngel_Report_*.md
+Folder1004_Report_*.md
+Folder*_Report_*.md
 
 # --- Local user data: NEVER commit ---
-# Per-run logs (the app writes these under ~/.folderangel/logs/, but
+# Per-run logs (the app writes these under ~/.folder1004/logs/, but
 # defensively also block any *.log anywhere in the tree in case a user
 # copies one in for debugging).
 *.log
 logs/
-.folderangel/
-folderangel_logs/
+.folder1004/
+.folder*/
+folder1004_logs/
+folder*_logs/
 
 # Saved settings / API keys / endpoints — both the app's canonical
 # locations and any common stray names.

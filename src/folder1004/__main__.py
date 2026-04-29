@@ -1,8 +1,8 @@
 """Unified entry point.
 
 Usage:
-  python -m folderangel                       # launch GUI
-  python -m folderangel --cli --path PATH [opts]
+  python -m folder1004                       # launch GUI
+  python -m folder1004 --cli --path PATH [opts]
 """
 from __future__ import annotations
 
@@ -98,7 +98,7 @@ def _run_cli(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv if argv is not None else sys.argv[1:])
-    parser = argparse.ArgumentParser(prog="folderangel")
+    parser = argparse.ArgumentParser(prog="folder1004")
     parser.add_argument("--cli", action="store_true", help="run headless without launching UI")
     parser.add_argument("--path", type=str, help="target folder for --cli mode")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")

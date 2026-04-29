@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 # to enforce a timeout.  Cross-platform: works identically on Linux,
 # macOS, and Windows (no SIGALRM dependency).
 _PARSE_POOL = _futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="folderangel-parse"
+    max_workers=2, thread_name_prefix="folder1004-parse"
 )
 
 SUPPORTED_EXTENSIONS: set[str] = {
@@ -116,7 +116,7 @@ def extract_excerpt(path: Path, max_chars: int = 1800, timeout: float = 5.0) -> 
     if ext in {".html", ".htm"}:
         return _safe(text_parser.parse_html, path, max_chars, timeout)
     # Archive containers: list member names so the classifier can use
-    # them as a synthetic "body".  See :mod:`folderangel.parsers.archive`.
+    # them as a synthetic "body".  See :mod:`folder1004.parsers.archive`.
     from . import archive as archive_parser
     if archive_parser.is_archive(path):
         return _safe(archive_parser.parse, path, max_chars, timeout)

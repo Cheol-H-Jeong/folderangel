@@ -1,8 +1,8 @@
 """Per-run logger.
 
-Every invocation of FolderAngel (GUI launch *and* each Organize run, plus
+Every invocation of Folder1004 (GUI launch *and* each Organize run, plus
 each CLI ``--cli`` call) gets a fresh timestamped log file under
-``~/.folderangel/logs/``.  We attach a ``logging.FileHandler`` to the root
+``~/.folder1004/logs/``.  We attach a ``logging.FileHandler`` to the root
 logger so every module's existing ``log.warning(...)`` / ``log.info(...)``
 call lands there, plus we install ``sys.excepthook`` so unhandled
 exceptions are captured with a full stack trace.
@@ -126,7 +126,7 @@ def start_session(tag: str = "session") -> Path:
             previous = sys.excepthook
 
             def _hook(exc_type, exc, tb):
-                logging.getLogger("folderangel.crash").error(
+                logging.getLogger("folder1004.crash").error(
                     "Unhandled exception:\n%s",
                     "".join(traceback.format_exception(exc_type, exc, tb)),
                 )
@@ -138,7 +138,7 @@ def start_session(tag: str = "session") -> Path:
         _silence_chatty_third_parties()
         _active_handler = handler
         _active_path = log_file
-        logging.getLogger("folderangel.runlog").info(
+        logging.getLogger("folder1004.runlog").info(
             "log session started: %s (pid=%d, python=%s)",
             log_file, os.getpid(), sys.version.split()[0],
         )
@@ -153,7 +153,7 @@ def log_exception(label: str, exc: BaseException) -> None:
     """Convenience helper used by callers that want to capture handled
     exceptions with a full stack trace into the per-run log file.
     """
-    logging.getLogger("folderangel.runlog").error(
+    logging.getLogger("folder1004.runlog").error(
         "%s: %s\n%s",
         label,
         exc,

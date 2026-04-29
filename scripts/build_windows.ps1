@@ -20,15 +20,15 @@ if (-not (Get-Command pyinstaller -ErrorAction SilentlyContinue)) {
 
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 
-pyinstaller --noconfirm "scripts\folderangel.spec"
+pyinstaller --noconfirm "scripts\folder1004.spec"
 
-$bundle = "$root\dist\folderangel"
+$bundle = "$root\dist\folder1004"
 if (-not (Test-Path $bundle)) {
     Write-Error "Build did not produce $bundle"
 }
 Write-Host ""
 Write-Host "Built bundle: $bundle"
-Write-Host "Run:          $bundle\folderangel.exe"
+Write-Host "Run:          $bundle\folder1004.exe"
 
 if ($Installer) {
     $iscc = Get-Command iscc -ErrorAction SilentlyContinue
@@ -37,7 +37,7 @@ if ($Installer) {
         Write-Warning "Install from https://jrsoftware.org/isdl.php and re-run."
         exit 0
     }
-    iscc "$root\scripts\folderangel.iss"
+    iscc "$root\scripts\folder1004.iss"
     Write-Host ""
-    Write-Host "Installer: $root\dist\FolderAngel-Setup.exe"
+    Write-Host "Installer: $root\dist\Folder1004-Setup.exe"
 }

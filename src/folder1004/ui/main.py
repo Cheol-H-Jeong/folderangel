@@ -24,7 +24,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config = config
         self.paths = paths
         self.index_db = IndexDB(paths.index_db)
-        self.setWindowTitle("FolderAngel")
+        self.setWindowTitle("Folder1004")
         self.resize(1180, 760)
 
         self._thread: QtCore.QThread | None = None
@@ -50,7 +50,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sb.setContentsMargins(16, 18, 16, 16)
         sb.setSpacing(6)
 
-        logo = QtWidgets.QLabel("FolderAngel")
+        logo = QtWidgets.QLabel("Folder1004")
         logo.setStyleSheet("font-size:19px;font-weight:700;padding:6px 10px 18px 10px;")
         sb.addWidget(logo)
 
@@ -240,10 +240,10 @@ def launch(argv: list[str] | None = None) -> int:
         # Use macOS unified title bar tone
         os.environ.setdefault("QT_MAC_WANTS_LAYER", "1")
     app = QtWidgets.QApplication(argv)
-    app.setApplicationName("FolderAngel")
-    app.setApplicationDisplayName("FolderAngel")
-    app.setOrganizationName("FolderAngel")
-    app.setOrganizationDomain("folderangel.app")
+    app.setApplicationName("Folder1004")
+    app.setApplicationDisplayName("Folder1004")
+    app.setOrganizationName("Folder1004")
+    app.setOrganizationDomain("folder1004.app")
 
     paths = default_paths()
     config = load_config(paths)

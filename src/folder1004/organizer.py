@@ -99,7 +99,7 @@ _TIME_SUFFIX_RE = re.compile(r"\s*\([^()]+\)\s*$")
 
 
 def folder_signature(cat_id: str) -> str:
-    """Short stable tag appended to every folderangel-created folder
+    """Short stable tag appended to every folder1004-created folder
     so we can later detect *exactly* which folders we made — used by
     the additive-classify mode to leave existing FA folders untouched
     and only sort *new* loose files into them.
@@ -115,7 +115,7 @@ def folder_signature(cat_id: str) -> str:
 _FA_TAG_RE = re.compile(r"\[FA·([a-f0-9]{4,12})\]\s*$")
 
 
-def is_folderangel_folder_name(name: str) -> bool:
+def is_folder1004_folder_name(name: str) -> bool:
     """Whether *name* looks like a folder we previously created."""
     return bool(_FA_TAG_RE.search(name or ""))
 

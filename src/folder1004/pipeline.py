@@ -92,7 +92,7 @@ def gather_entries(
     entries: list[FileEntry] = []
     try:
         with _futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="folderangel-pipeline"
+            max_workers=workers, thread_name_prefix="folder1004-pipeline"
         ) as pool:
             for entry in pool.map(_parse_one, enumerate(paths, 1), chunksize=4):
                 if entry is not None:
@@ -143,15 +143,15 @@ def run(
                 0.06,
             )
     elif mode == "additive":
-        # 추가 분류 — FolderAngel 가 만들어준 폴더만 카테고리로 활용.
+        # 추가 분류 — Folder1004 가 만들어준 폴더만 카테고리로 활용.
         # 그 안의 파일들은 이미 분류된 것으로 간주, 재분류 안 함.
         # 외부에 떨어진 새 파일들만 FA 폴더(혹은 신규 폴더)로 보냄.
         seed_categories = _seed_categories_from_disk(target_root, fa_only=True)
-        from .organizer import is_folderangel_folder_name
+        from .organizer import is_folder1004_folder_name
         fa_paths: list[Path] = []
         if target_root.is_dir():
             for d in target_root.iterdir():
-                if d.is_dir() and is_folderangel_folder_name(d.name):
+                if d.is_dir() and is_folder1004_folder_name(d.name):
                     fa_paths.append(d.resolve())
         # Drop any entry whose absolute path lies inside an FA folder.
         if fa_paths:
@@ -375,7 +375,7 @@ def _seed_categories_from_disk(
     """
     import re
     from .organizer import (
-        is_folderangel_folder_name,
+        is_folder1004_folder_name,
         parse_fa_folder_name,
     )
     if not target_root.is_dir():
@@ -387,7 +387,7 @@ def _seed_categories_from_disk(
         if entry.name.startswith(".") or entry.name.startswith("__"):
             continue
         raw = entry.name
-        if fa_only and not is_folderangel_folder_name(raw):
+        if fa_only and not is_folder1004_folder_name(raw):
             continue
         parsed = parse_fa_folder_name(raw)
         if parsed:

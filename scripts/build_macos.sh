@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the macOS .app bundle (and optionally a .dmg) for FolderAngel.
+# Build the macOS .app bundle (and optionally a .dmg) for Folder1004.
 #
 # Usage (run from the repo root, inside an activated venv with dev extras):
 #   bash scripts/build_macos.sh           # .app only
@@ -23,9 +23,9 @@ if ! command -v pyinstaller >/dev/null 2>&1; then
 fi
 
 rm -rf build dist
-pyinstaller --noconfirm scripts/folderangel.spec
+pyinstaller --noconfirm scripts/folder1004.spec
 
-APP="$ROOT/dist/FolderAngel.app"
+APP="$ROOT/dist/Folder1004.app"
 if [[ ! -d "$APP" ]]; then
     echo "Expected $APP after build but it's missing." >&2
     exit 1
@@ -39,15 +39,15 @@ if [[ "${1:-}" == "dmg" ]]; then
         echo "create-dmg not found — run: brew install create-dmg" >&2
         exit 0
     fi
-    DMG="$ROOT/dist/FolderAngel-1.0.0.dmg"
+    DMG="$ROOT/dist/Folder1004-1.0.0.dmg"
     rm -f "$DMG"
     create-dmg \
-        --volname "FolderAngel" \
+        --volname "Folder1004" \
         --window-pos 200 200 \
         --window-size 640 400 \
         --icon-size 110 \
-        --icon "FolderAngel.app" 175 200 \
-        --hide-extension "FolderAngel.app" \
+        --icon "Folder1004.app" 175 200 \
+        --hide-extension "Folder1004.app" \
         --app-drop-link 465 200 \
         "$DMG" \
         "$APP"

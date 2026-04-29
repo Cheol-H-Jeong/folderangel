@@ -1,6 +1,6 @@
 """Persistent cache of parser excerpts.
 
-Re-running ``folderangel`` on the same corpus re-parses every
+Re-running ``folder1004`` on the same corpus re-parses every
 document — that's the dominant cost on huge folders.  We keep a
 small SQLite store keyed by ``(absolute_path, mtime, size)`` so
 unchanged files skip parsing entirely.

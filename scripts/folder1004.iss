@@ -1,15 +1,15 @@
-; Inno Setup script — produces a friendly Windows installer for FolderAngel.
+; Inno Setup script — produces a friendly Windows installer for Folder1004.
 ;
-; Build with:  iscc scripts\folderangel.iss
-; Output:      dist\FolderAngel-Setup.exe
+; Build with:  iscc scripts\folder1004.iss
+; Output:      dist\Folder1004-Setup.exe
 ;
 ; Assumes ``scripts\build_windows.ps1`` has already produced
-; ``dist\folderangel\folderangel.exe`` and its supporting bundle.
+; ``dist\folder1004\folder1004.exe`` and its supporting bundle.
 
-#define AppName "FolderAngel"
+#define AppName "Folder1004"
 #define AppVersion "1.0.0"
-#define AppPublisher "FolderAngel"
-#define AppExeName "folderangel.exe"
+#define AppPublisher "Folder1004"
+#define AppExeName "folder1004.exe"
 
 [Setup]
 AppId={{4E1C2F32-9C7D-4F70-AB10-FA15FA15FA15}
@@ -19,7 +19,7 @@ AppPublisher={#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=..\dist
-OutputBaseFilename=FolderAngel-Setup
+OutputBaseFilename=Folder1004-Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -34,7 +34,7 @@ Name: "korean";  MessagesFile: "compiler:Languages\Korean.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\folderangel\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\folder1004\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

@@ -179,7 +179,7 @@ def _write_desktop_link(path: Path, target: Path) -> None:
         "Version=1.0\n"
         "Type=Link\n"
         f"Name={target.name}\n"
-        f"Comment=FolderAngel link to {target}\n"
+        f"Comment=Folder1004 link to {target}\n"
         f"URL={target_uri}\n"
         f"Icon=text-x-generic\n"
     )
@@ -212,7 +212,7 @@ def _write_desktop_application(path: Path, target: Path) -> None:
         "Version=1.0\n"
         "Type=Application\n"
         f"Name={target.name}\n"
-        f"Comment=FolderAngel link to {target}\n"
+        f"Comment=Folder1004 link to {target}\n"
         f"Exec={exec_cmd}\n"
         f"TryExec=xdg-open\n"
         f"Icon=text-x-generic\n"

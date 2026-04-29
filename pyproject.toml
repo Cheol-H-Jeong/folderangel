@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "folderangel"
+name = "folder1004"
 version = "1.0.0"
 description = "LLM-powered cross-platform folder auto-organizer with an Apple-inspired UI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "FolderAngel Team"}]
+authors = [{name = "Folder1004 Team"}]
 keywords = ["file", "organizer", "llm", "gemini", "pyside6"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -45,10 +45,10 @@ dev = [
 ]
 
 [project.scripts]
-folderangel = "folderangel.__main__:main"
+folder1004 = "folder1004.__main__:main"
 
 [project.gui-scripts]
-folderangel-gui = "folderangel.__main__:main"
+folder1004-gui = "folder1004.__main__:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -45,17 +45,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: folderangel-linux
+            artifact: folder1004-linux
             build_cmd: "bash scripts/build_linux.sh"
-            output: "dist/folderangel"
+            output: "dist/folder1004"
           - os: macos-latest
-            artifact: FolderAngel-macOS
+            artifact: Folder1004-macOS
             build_cmd: "bash scripts/build_macos.sh"
-            output: "dist/FolderAngel.app"
+            output: "dist/Folder1004.app"
           - os: windows-latest
-            artifact: FolderAngel-Windows
+            artifact: Folder1004-Windows
             build_cmd: "powershell -ExecutionPolicy Bypass -File scripts\\build_windows.ps1"
-            output: "dist/folderangel"
+            output: "dist/folder1004"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

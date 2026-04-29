@@ -1,4 +1,4 @@
-"""FolderAngel — LLM-powered folder auto-organizer.
+"""Folder1004 — LLM-powered folder auto-organizer.
 
 Public re-exports for a stable import surface.
 """
