@@ -5,7 +5,7 @@ Given a list of ``FileEntry`` objects, coordinate:
   Stage A-merge – consolidate to a final category list
   Stage B – per-batch assignment using the final list
 
-Every stage falls back to the heuristic :mod:`folderangel.llm.mock` planner if
+Every stage falls back to the heuristic :mod:`folder1004.llm.mock` planner if
 the LLM call fails or is unavailable, so the pipeline always yields a usable
 plan.  That fallback is the reason we don't hard-fail the user on API errors.
 """
@@ -319,7 +319,7 @@ def _proper_noun_tokens(text: str) -> frozenset[str]:
     (:func:`_guess_by_time`) where we must NOT snap a file into a
     project category just because their text shares generic NNG nouns
     (``지원``/``운영``/``체계``) or 2-char ASCII abbreviations
-    (``AI``/``ML``).  See :func:`folderangel.morph.extract_proper_nouns`
+    (``AI``/``ML``).  See :func:`folder1004.morph.extract_proper_nouns`
     for the underlying tag rules.
     """
     if not text:
@@ -475,6 +475,9 @@ class Planner:
         # so the LLM places new files into existing folders instead of
         # inventing parallel ones.
         self.seed_categories: list[dict] = list(seed_categories or [])
+
+    def _classification_guidance(self) -> str:
+        return (getattr(self.config, "classification_guidance", "") or "").strip()
 
     def _llm_call(
         self,
@@ -725,7 +728,7 @@ class Planner:
         # Rolling-window planner.  Replaces the old hierarchical /
         # filename-first / outlier-discover stack for every provider
         # whose effective context window can hold at least
-        # MIN_CHUNK_FILES per call.  See :mod:`folderangel.rolling`.
+        # MIN_CHUNK_FILES per call.  See :mod:`folder1004.rolling`.
         # ------------------------------------------------------------------
         try:
             from . import rolling as _rolling
@@ -808,7 +811,9 @@ class Planner:
                     (idx - 1) / max(1, len(batches)) * 0.4,
                 )
             prompt = prompts.build_stage_a(
-                batch, reclassify_mode=bool(getattr(self.config, "reclassify_mode", False))
+                batch,
+                reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+                classification_guidance=self._classification_guidance(),
             )
             try:
                 resp = self._llm_call(
@@ -837,6 +842,7 @@ class Planner:
                 self.config.min_categories,
                 self.config.max_categories,
                 reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+                classification_guidance=self._classification_guidance(),
             )
             merged = self._llm_call(
                 merge_prompt,
@@ -893,7 +899,7 @@ class Planner:
         payloads: list[dict],
         progress: Optional[ProgressCB],
     ) -> dict:
-        """Linear single-pass planner.  See :mod:`folderangel.rolling`."""
+        """Linear single-pass planner.  See :mod:`folder1004.rolling`."""
         from . import rolling as _rolling
 
         anonymise = bool(getattr(self.config, "reclassify_mode", False))
@@ -944,6 +950,7 @@ class Planner:
                 chunk_payload,
                 ambiguity_threshold=self.config.ambiguity_threshold,
                 reclassify_mode=anonymise,
+                classification_guidance=self._classification_guidance(),
             )
             chunk_no = (idx // max(1, chunk_size)) + 1
             n_chunks_est = (total_rows + chunk_size - 1) // chunk_size
@@ -1016,7 +1023,9 @@ class Planner:
                     0.93,
                 )
             try:
-                cprompt = _rolling.build_consolidation_prompt(cum_cats)
+                cprompt = _rolling.build_consolidation_prompt(
+                    cum_cats, self._classification_guidance()
+                )
                 cresp = self._llm_call(
                     cprompt,
                     heartbeat=self._heartbeat_for("rolling consolidation 응답 대기", progress),
@@ -1227,6 +1236,7 @@ class Planner:
             self.config.max_categories,
             self.config.ambiguity_threshold,
             reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            classification_guidance=self._classification_guidance(),
         )
         # Korean+JSON mixed: ~3 chars/token is a safe upper bound.
         prompt_tokens_est = max(1, len(prompt) // 3)
@@ -1263,6 +1273,7 @@ class Planner:
             prompt = prompts.build_compact_discover(
                 _strip_payload(batch),
                 reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+                classification_guidance=self._classification_guidance(),
             )
             try:
                 resp = self._llm_call(
@@ -1300,6 +1311,7 @@ class Planner:
             self.config.min_categories,
             self.config.max_categories,
             reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            classification_guidance=self._classification_guidance(),
         )
         merged = self._llm_call(
             merge_prompt,
@@ -1331,6 +1343,7 @@ class Planner:
                 categories_raw,
                 self.config.ambiguity_threshold,
                 reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+                classification_guidance=self._classification_guidance(),
             )
             try:
                 resp = self._llm_call(
@@ -1364,7 +1377,11 @@ class Planner:
         """Split-and-retry helper for Pass A when a chunk is still too big."""
         if not batch:
             return []
-        prompt = prompts.build_compact_discover(_strip_payload(batch))
+        prompt = prompts.build_compact_discover(
+            _strip_payload(batch),
+            reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            classification_guidance=self._classification_guidance(),
+        )
         try:
             resp = self._llm_call(
                 prompt,
@@ -1471,6 +1488,7 @@ class Planner:
                 self.config.max_categories,
                 self.config.ambiguity_threshold,
                 reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+                classification_guidance=self._classification_guidance(),
             )
             if progress:
                 progress(f"plan: LLM 호출 중 ({len(payloads)} 파일)…", -1.0)
@@ -1521,6 +1539,7 @@ class Planner:
             self.config.max_categories,
             self.config.ambiguity_threshold,
             reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            classification_guidance=self._classification_guidance(),
         )
         design = self._llm_call(
             design_prompt,
@@ -1573,6 +1592,7 @@ class Planner:
             categories_payload,
             self.config.ambiguity_threshold,
             reclassify_mode=bool(getattr(self.config, "reclassify_mode", False)),
+            classification_guidance=self._classification_guidance(),
         )
         try:
             resp = self._llm_call(

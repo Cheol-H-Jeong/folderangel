@@ -11,8 +11,43 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_KEYRING_SERVICE = "folderangel"
+_KEYRING_SERVICE = "folder1004"
 _KEYRING_USER = "gemini_api_key"  # legacy, kept for migration
+
+CLASSIFICATION_GUIDANCE_PRESETS = [
+    {
+        "label": "프로젝트 중심",
+        "text": "프로젝트명, 고객사명, 사업명처럼 일이 진행된 단위를 가장 우선해서 묶어줘. 같은 프로젝트라도 계약·정산·회의·산출물은 필요하면 분리해줘.",
+    },
+    {
+        "label": "업무/용도 중심",
+        "text": "파일이 실제로 어떤 용도인지 우선해줘. 산출물, 계약, 정산, 회의, 참고자료, 미디어처럼 쓰임새가 다르면 같은 주제라도 다른 폴더로 나눠줘.",
+    },
+    {
+        "label": "날짜/기간 중심",
+        "text": "작성·수정 시기와 파일명 날짜를 중요하게 봐줘. 월별·분기별·학기별·연도별로 자연스러운 기간 라벨이 보이면 폴더명에 반영해줘.",
+    },
+    {
+        "label": "사람/고객 중심",
+        "text": "사람 이름, 고객명, 기관명, 반/팀 이름이 보이면 그 단위를 우선해줘. 사진·계약·피드백·납품본이 섞여 있어도 같은 고객 흐름을 찾기 쉽게 해줘.",
+    },
+    {
+        "label": "최대한 세분화",
+        "text": "큰 잡동사니 폴더보다 의미가 분명한 작은 폴더를 선호해. 단, 1~2개짜리 너무 자잘한 폴더는 비슷한 큰 폴더에 흡수해줘.",
+    },
+    {
+        "label": "보수적으로 정리",
+        "text": "확신이 낮으면 무리하게 새 폴더를 만들지 말고 기타 또는 검토 필요 쪽으로 보내줘. 중요한 파일이 엉뚱한 곳에 가지 않는 것을 우선해줘.",
+    },
+    {
+        "label": "버림 후보 분리",
+        "text": "깨진 다운로드, 임시 파일, 오래된 설치 파일, 자동저장/복구 파일, OS 부산물은 삭제하지 말고 검토용 버림 후보 폴더로 따로 모아줘.",
+    },
+    {
+        "label": "수업/학기 중심",
+        "text": "선생님이나 학생 폴더라면 학기, 과목, 수업자료, 과제, 평가, 행정자료 축을 우선해서 폴더를 만들어줘.",
+    },
+]
 
 
 def _keyring_user_for(provider: str) -> str:
@@ -66,18 +101,18 @@ def provider_label(cfg: "Config") -> str:
 def default_paths() -> AppPaths:
     """Pick a platform-appropriate data dir.
 
-      Linux:    ``$XDG_DATA_HOME/folderangel`` if set, else
-                ``~/.local/share/folderangel`` if it already exists,
-                else legacy ``~/.folderangel``.
-      macOS:    ``~/Library/Application Support/FolderAngel``
-                (legacy ``~/.folderangel`` is read transparently if the
+      Linux:    ``$XDG_DATA_HOME/folder1004`` if set, else
+                ``~/.local/share/folder1004`` if it already exists,
+                else legacy ``~/.folder1004``.
+      macOS:    ``~/Library/Application Support/Folder1004``
+                (legacy ``~/.folder1004`` is read transparently if the
                 user was running an older build).
-      Windows:  ``%LOCALAPPDATA%/FolderAngel`` (then ``%APPDATA%``,
+      Windows:  ``%LOCALAPPDATA%/Folder1004`` (then ``%APPDATA%``,
                 then home).
 
-    Override with ``FOLDERANGEL_HOME`` for tests / portable installs.
+    Override with ``FOLDER1004_HOME`` for tests / portable installs.
     """
-    override = os.environ.get("FOLDERANGEL_HOME")
+    override = os.environ.get("FOLDER1004_HOME")
     if override:
         base = Path(override).expanduser()
     elif sys.platform.startswith("win"):
@@ -85,19 +120,19 @@ def default_paths() -> AppPaths:
             os.environ.get("LOCALAPPDATA")
             or os.environ.get("APPDATA")
             or Path.home()
-        ) / "FolderAngel"
+        ) / "Folder1004"
     elif sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "FolderAngel"
-        legacy = Path.home() / ".folderangel"
+        base = Path.home() / "Library" / "Application Support" / "Folder1004"
+        legacy = Path.home() / ".folder1004"
         if legacy.exists() and not base.exists():
             base = legacy   # respect existing data from older versions
     else:
         xdg = os.environ.get("XDG_DATA_HOME")
         if xdg:
-            base = Path(xdg) / "folderangel"
+            base = Path(xdg) / "folder1004"
         else:
-            modern = Path.home() / ".local" / "share" / "folderangel"
-            legacy = Path.home() / ".folderangel"
+            modern = Path.home() / ".local" / "share" / "folder1004"
+            legacy = Path.home() / ".folder1004"
             base = modern if modern.exists() or not legacy.exists() else legacy
     return AppPaths(
         root=base,
@@ -139,6 +174,10 @@ class Config:
     # Name of the currently-active preset.  Empty string = freeform
     # (matches the flat fields above without belonging to any preset).
     active_preset: str = ""
+    # Natural-language instructions the user wants to add to every LLM
+    # planning prompt. Stored locally only; never pre-filled with secrets.
+    classification_guidance: str = ""
+    classification_guidance_preset_names: list[str] = field(default_factory=list)
     batch_size: int = 30
     max_files: int = 5000
     min_categories: int = 3
@@ -231,7 +270,7 @@ class Config:
     #                 / unsorted files into them, appending a brand-new
     #                 category only when no existing folder fits.  Use
     #                 every subsequent time the user pours new files
-    #                 into a folder that FolderAngel has organised
+    #                 into a folder that Folder1004 has organised
     #                 before.
     organize_mode: str = "new"
 
@@ -295,7 +334,7 @@ def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) ->
     checked depend on provider:
 
       gemini        → GEMINI_API_KEY, GOOGLE_API_KEY
-      openai_compat → OPENAI_API_KEY, FOLDERANGEL_OPENAI_API_KEY
+      openai_compat → OPENAI_API_KEY, FOLDER1004_OPENAI_API_KEY
 
     Past bug: lookup for ``openai_compat`` would fall back to the
     legacy ``gemini_api_key`` slot when its own slot was empty,
@@ -307,7 +346,7 @@ def get_api_key(cfg: Optional[Config] = None, provider: Optional[str] = None) ->
     env_keys = (
         ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
         if p == "gemini"
-        else ["OPENAI_API_KEY", "FOLDERANGEL_OPENAI_API_KEY"]
+        else ["OPENAI_API_KEY", "FOLDER1004_OPENAI_API_KEY"]
     )
     for name in env_keys:
         v = os.environ.get(name)

@@ -9,8 +9,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 from PySide6 import QtWidgets  # noqa: E402
 
-from folderangel.config import default_paths, load_config  # noqa: E402
-from folderangel.ui.main import MainWindow  # noqa: E402
+from folder1004.config import default_paths, load_config  # noqa: E402
+from folder1004.ui.main import MainWindow  # noqa: E402
 
 
 def test_every_stream_label_in_planner_uses_live_status_phrase():
@@ -22,7 +22,7 @@ def test_every_stream_label_in_planner_uses_live_status_phrase():
     """
     from pathlib import Path
     src = (Path(__file__).resolve().parents[1]
-           / "src" / "folderangel" / "planner.py").read_text(encoding="utf-8")
+           / "src" / "folder1004" / "planner.py").read_text(encoding="utf-8")
     import re
     # Match either f-strings or plain strings.
     bad: list[str] = []
@@ -46,8 +46,8 @@ def test_live_status_collapses_heartbeat_and_token_stream(tmp_path, monkeypatch)
     monkeypatch.setenv("APPDATA", str(tmp_path))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     from PySide6 import QtWidgets
-    from folderangel.config import default_paths, load_config
-    from folderangel.ui.views import OrganizeView
+    from folder1004.config import default_paths, load_config
+    from folder1004.ui.views import OrganizeView
 
     paths = default_paths(); paths.ensure()
     cfg = load_config(paths)
@@ -90,8 +90,8 @@ def test_token_stream_preview_strips_json_noise(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     from PySide6 import QtWidgets
-    from folderangel.config import Config, default_paths, load_config
-    from folderangel.planner import Planner
+    from folder1004.config import Config, default_paths, load_config
+    from folder1004.planner import Planner
 
     paths = default_paths(); paths.ensure()
     cfg = load_config(paths)
@@ -154,3 +154,38 @@ def test_mainwindow_builds(tmp_path, monkeypatch):
         app.processEvents()
     w.close()
     w.index_db.close()
+
+
+def test_settings_guidance_preset_updates_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    from folder1004.config import CLASSIFICATION_GUIDANCE_PRESETS, Config
+    import folder1004.ui.views as views
+    from folder1004.ui.views import SettingsView
+
+    monkeypatch.setattr(views, "show_toast_dialog", lambda *args, **kwargs: None)
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    view = SettingsView(Config())
+    preset = CLASSIFICATION_GUIDANCE_PRESETS[0]
+    view._apply_guidance_preset(preset)
+    assert preset["text"] in view.edit_classification_guidance.toPlainText()
+    view._save()
+    assert preset["text"] in view.config.classification_guidance
+    assert preset["label"] in view.config.classification_guidance_preset_names
+    view.close()
+
+
+def test_prompt_builders_include_classification_guidance():
+    from folder1004.llm import prompts
+
+    prompt = prompts.build_single_call(
+        [{"path": "/tmp/a.pdf", "name": "a.pdf"}],
+        3,
+        12,
+        0.15,
+        classification_guidance="고객명 중심으로 묶어줘.",
+    )
+    assert "사용자 분류 원칙" in prompt
+    assert "고객명 중심" in prompt

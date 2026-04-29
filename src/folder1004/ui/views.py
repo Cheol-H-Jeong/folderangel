@@ -8,7 +8,13 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ..config import Config, get_api_key, save_config, set_api_key
+from ..config import (
+    CLASSIFICATION_GUIDANCE_PRESETS,
+    Config,
+    get_api_key,
+    save_config,
+    set_api_key,
+)
 from ..index import IndexDB
 from ..models import OperationResult
 from .widgets import Card, PathDropBar, StageIndicator, StatsRow
@@ -230,7 +236,7 @@ class OrganizeView(QtWidgets.QWidget):
         )
         self.rad_add = QtWidgets.QRadioButton("추가 분류 (FA 폴더 보존)")
         self.rad_add.setToolTip(
-            "FolderAngel 가 만든 폴더는 그대로 두고, 새로 부어 넣은\n"
+            "Folder1004 가 만든 폴더는 그대로 두고, 새로 부어 넣은\n"
             "파일만 그 폴더들에 추가하거나 필요시 새 폴더를 만듭니다.\n"
             "이미 정리된 폴더에 새 파일만 쏟아 넣고 정리할 때 사용하세요."
         )
@@ -580,9 +586,9 @@ class OrganizeView(QtWidgets.QWidget):
 
     def _open_report(self):
         if self._last_op:
-            # The reporter writes to target_root/FolderAngel_Report_*.md
+            # The reporter writes to target_root/Folder1004_Report_*.md
             stamp = self._last_op.finished_at.strftime("%Y%m%d_%H%M%S")
-            p = self._last_op.target_root / f"FolderAngel_Report_{stamp}.md"
+            p = self._last_op.target_root / f"Folder1004_Report_{stamp}.md"
             if p.exists():
                 _open_in_explorer(p)
 
@@ -783,7 +789,7 @@ class HistoryView(QtWidgets.QWidget):
         target = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
         if target:
             try:
-                candidates = sorted(Path(target).glob("FolderAngel_Report_*.md"))
+                candidates = sorted(Path(target).glob("Folder1004_Report_*.md"))
                 if candidates:
                     _open_in_explorer(candidates[-1])
                     return
@@ -933,6 +939,59 @@ class SettingsView(QtWidgets.QWidget):
         c1.addWidget(self.lbl_status)
 
         v.addWidget(conn_card)
+
+        # ────────────────────────────────────────────────────────────
+        # Card 2 — 사용자 분류 원칙
+        # LLM에게 전달할 자연어 정리 방향. 프리셋 버튼은 타이핑을
+        # 대신해 자주 쓰는 원칙을 한 번에 채워 넣는다.
+        # ────────────────────────────────────────────────────────────
+        guide_card = Card()
+        c2 = QtWidgets.QVBoxLayout(guide_card)
+        c2.setContentsMargins(18, 16, 18, 16)
+        c2.setSpacing(10)
+        c2_title = QtWidgets.QLabel("분류 원칙")
+        c2_title.setStyleSheet("font-size:16px;font-weight:600;")
+        c2.addWidget(c2_title)
+        c2_sub = QtWidgets.QLabel(
+            "원하는 정리 방향을 자연어로 적어두면 모든 LLM 분류 요청에 함께 전달됩니다. "
+            "아래 프리셋을 누르면 타이핑 없이 원칙을 추가할 수 있습니다."
+        )
+        c2_sub.setWordWrap(True)
+        c2_sub.setStyleSheet("color:#6e6e73;font-size:12px;")
+        c2.addWidget(c2_sub)
+
+        self.edit_classification_guidance = QtWidgets.QTextEdit()
+        self.edit_classification_guidance.setAcceptRichText(False)
+        self.edit_classification_guidance.setMinimumHeight(96)
+        self.edit_classification_guidance.setPlaceholderText(
+            "예: 사진은 고객명과 촬영일을 우선하고, 계약·견적·정산 파일은 따로 모아줘. "
+            "확신이 낮은 파일은 검토 필요로 보내줘."
+        )
+        self.edit_classification_guidance.setPlainText(
+            (getattr(self.config, "classification_guidance", "") or "").strip()
+        )
+        c2.addWidget(self.edit_classification_guidance)
+
+        preset_grid = QtWidgets.QGridLayout()
+        preset_grid.setContentsMargins(0, 2, 0, 0)
+        preset_grid.setHorizontalSpacing(6)
+        preset_grid.setVerticalSpacing(6)
+        for i, preset in enumerate(CLASSIFICATION_GUIDANCE_PRESETS):
+            btn = QtWidgets.QPushButton(preset["label"])
+            btn.setObjectName("Ghost")
+            btn.setToolTip(preset["text"])
+            btn.clicked.connect(lambda _checked=False, p=preset: self._apply_guidance_preset(p))
+            preset_grid.addWidget(btn, i // 4, i % 4)
+        c2.addLayout(preset_grid)
+
+        guide_actions = QtWidgets.QHBoxLayout()
+        guide_actions.addStretch(1)
+        btn_clear_guidance = QtWidgets.QPushButton("분류 원칙 비우기")
+        btn_clear_guidance.setObjectName("Ghost")
+        btn_clear_guidance.clicked.connect(self._clear_guidance)
+        guide_actions.addWidget(btn_clear_guidance)
+        c2.addLayout(guide_actions)
+        v.addWidget(guide_card)
 
         # ────────────────────────────────────────────────────────────
         # Card 3 — 분류 동작
@@ -1153,6 +1212,25 @@ class SettingsView(QtWidgets.QWidget):
         self._refresh_status()
         self.config_changed.emit()
 
+    def _apply_guidance_preset(self, preset: dict) -> None:
+        label = str(preset.get("label") or "").strip()
+        text = str(preset.get("text") or "").strip()
+        if not text:
+            return
+        current = self.edit_classification_guidance.toPlainText().strip()
+        if text in current:
+            return
+        next_text = text if not current else f"{current}\n\n- {text}"
+        self.edit_classification_guidance.setPlainText(next_text)
+        names = list(getattr(self.config, "classification_guidance_preset_names", []) or [])
+        if label and label not in names:
+            names.append(label)
+        self.config.classification_guidance_preset_names = names
+
+    def _clear_guidance(self) -> None:
+        self.edit_classification_guidance.clear()
+        self.config.classification_guidance_preset_names = []
+
     # ------------------------------------------------------------------
     # Preset management
     # ------------------------------------------------------------------
@@ -1336,6 +1414,9 @@ class SettingsView(QtWidgets.QWidget):
         # here.  Keep the legacy reclassify_mode bool aligned with the
         # latest run so old code paths don't desync.
         self.config.dedup_min_bytes = int(self.spin_dedup_mb.value()) * (1 << 20)
+        self.config.classification_guidance = (
+            self.edit_classification_guidance.toPlainText().strip()
+        )
         self.config.appearance = self.cmb_appearance.currentText()
         # Reasoning mode is decided automatically from the model name in
         # OpenAICompatClient — no user knob.  Keep the saved value at

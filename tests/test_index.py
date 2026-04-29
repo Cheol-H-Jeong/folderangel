@@ -1,8 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
-from folderangel.index import IndexDB
-from folderangel.models import Category, MovedFile, OperationResult
+from folder1004.index import IndexDB
+from folder1004.models import Category, MovedFile, OperationResult
 
 
 def _sample_op(tmp_path: Path) -> OperationResult:
@@ -44,7 +44,7 @@ def test_record_and_search(tmp_path):
 
 
 def _make_recorded_op(tmp_path: Path, src_name: str, dst_dir: str):
-    from folderangel.models import Category, MovedFile, OperationResult
+    from folder1004.models import Category, MovedFile, OperationResult
     folder = tmp_path / dst_dir
     folder.mkdir(exist_ok=True)
     f = folder / src_name
@@ -85,7 +85,7 @@ def test_search_finds_by_content_excerpt(tmp_path):
     """A file whose name says nothing but whose content_excerpt contains
     the term should still be findable.
     """
-    from folderangel.models import Category, MovedFile, OperationResult
+    from folder1004.models import Category, MovedFile, OperationResult
     folder = tmp_path / "f1"
     folder.mkdir()
     f = folder / "anonymous_doc.pdf"
@@ -137,7 +137,7 @@ def test_record_operation_dedups_by_path(tmp_path):
     op1 = _make_recorded_op(tmp_path, "a.txt", "f1")
     db.record_operation(op1)
     # Run 2: a.txt's NEW location is now f1/a.txt → it gets moved into f2/
-    from folderangel.models import Category, MovedFile, OperationResult
+    from folder1004.models import Category, MovedFile, OperationResult
     folder2 = tmp_path / "f2"
     folder2.mkdir()
     new_path = folder2 / "a.txt"
@@ -177,7 +177,7 @@ def test_record_operation_persists_report_path(tmp_path):
     open it on double-click."""
     db = IndexDB(tmp_path / "idx.db")
     op = _make_recorded_op(tmp_path, "a.txt", "f1")
-    rp = tmp_path / "FolderAngel_Report_20260101_120000.md"
+    rp = tmp_path / "Folder1004_Report_20260101_120000.md"
     rp.write_text("# Report")
     op.report_path = rp
     db.record_operation(op)
@@ -189,7 +189,7 @@ def test_record_operation_persists_report_path(tmp_path):
 def test_config_preset_round_trips_through_save_load(tmp_path, monkeypatch):
     """Adding a preset, saving config, reloading it must keep the
     preset list intact — covers the JSON serialisation path."""
-    from folderangel.config import Config, load_config, save_config, AppPaths
+    from folder1004.config import Config, load_config, save_config, AppPaths
     paths = AppPaths(
         root=tmp_path,
         config=tmp_path / "config.json",
@@ -206,9 +206,13 @@ def test_config_preset_round_trips_through_save_load(tmp_path, monkeypatch):
          "reasoning_mode": "off"},
     ]
     cfg.active_preset = "로컬 Ollama"
+    cfg.classification_guidance = "고객명과 기간을 우선해서 분류해줘."
+    cfg.classification_guidance_preset_names = ["사람/고객 중심"]
     save_config(cfg, paths)
     loaded = load_config(paths)
     assert loaded.active_preset == "로컬 Ollama"
+    assert loaded.classification_guidance == "고객명과 기간을 우선해서 분류해줘."
+    assert loaded.classification_guidance_preset_names == ["사람/고객 중심"]
     names = {p["name"] for p in loaded.llm_presets}
     assert names == {"회사 Gemini", "로컬 Ollama"}
     by_name = {p["name"]: p for p in loaded.llm_presets}
