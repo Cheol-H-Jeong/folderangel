@@ -1,4 +1,4 @@
-from folderangel.llm import mock
+from folder1004.llm import mock
 
 
 def _mkfile(name, ext, excerpt=""):

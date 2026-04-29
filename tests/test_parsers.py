@@ -2,14 +2,14 @@ import io
 import zipfile
 from pathlib import Path
 
-from folderangel.parsers import extract_excerpt
+from folder1004.parsers import extract_excerpt
 
 
 def test_plain_text(tmp_path):
     p = tmp_path / "hello.txt"
-    p.write_text("안녕하세요 FolderAngel!", encoding="utf-8")
+    p.write_text("안녕하세요 Folder1004!", encoding="utf-8")
     excerpt = extract_excerpt(p)
-    assert "FolderAngel" in excerpt
+    assert "Folder1004" in excerpt
 
 
 def test_markdown(tmp_path):

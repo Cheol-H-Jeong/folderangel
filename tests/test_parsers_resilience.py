@@ -7,8 +7,8 @@ import io
 import zipfile
 from pathlib import Path
 
-from folderangel.parsers import extract_excerpt
-from folderangel.parsers.pdf import parse as pdf_parse
+from folder1004.parsers import extract_excerpt
+from folder1004.parsers.pdf import parse as pdf_parse
 
 
 def test_garbage_pdf_returns_empty_no_raise(tmp_path):
@@ -50,7 +50,7 @@ def test_encrypted_pdf_falls_back_to_metadata(tmp_path):
 
 
 def test_humanise_encrypted_skip_reason():
-    from folderangel.organizer import _humanise_skip_reason
+    from folder1004.organizer import _humanise_skip_reason
 
     out = _humanise_skip_reason(RuntimeError("File has not been decrypted"),
                                 Path("/tmp/secret.pdf"))

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from folderangel.parser_cache import ParserCache
+from folder1004.parser_cache import ParserCache
 
 
 def test_cache_hit_skips_cold_parse(tmp_path):

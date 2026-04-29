@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from folderangel.config import Config
-from folderangel.models import Assignment, Category, Plan, SecondaryAssignment
-from folderangel.organizer import Organizer, sanitize_folder_name
+from folder1004.config import Config
+from folder1004.models import Assignment, Category, Plan, SecondaryAssignment
+from folder1004.organizer import Organizer, sanitize_folder_name
 
 
 def test_sanitize_invalid_chars():
@@ -81,7 +81,7 @@ def test_shortcut_created_for_secondary(tmp_path):
 
 
 def test_humanise_skip_reason_filenotfound_uses_korean():
-    from folderangel.organizer import _humanise_skip_reason
+    from folder1004.organizer import _humanise_skip_reason
     p = Path("/tmp/missing/file.pdf")
     out = _humanise_skip_reason(FileNotFoundError(p), p)
     assert "사라짐" in out and "/tmp/missing" not in out  # not raw path
@@ -91,9 +91,9 @@ def test_organizer_recovers_moved_source_by_basename(tmp_path):
     """If the recorded source is gone but the same file exists
     elsewhere under target_root, organizer should find and move it
     instead of skipping."""
-    from folderangel.config import Config
-    from folderangel.models import Assignment, Category, Plan
-    from folderangel.organizer import Organizer
+    from folder1004.config import Config
+    from folder1004.models import Assignment, Category, Plan
+    from folder1004.organizer import Organizer
 
     real = tmp_path / "actual" / "report.pdf"
     real.parent.mkdir()
@@ -113,9 +113,9 @@ def test_organizer_recovers_moved_source_by_basename(tmp_path):
 
 
 def test_organizer_dedups_duplicate_assignments(tmp_path):
-    from folderangel.config import Config
-    from folderangel.models import Assignment, Category, Plan
-    from folderangel.organizer import Organizer
+    from folder1004.config import Config
+    from folder1004.models import Assignment, Category, Plan
+    from folder1004.organizer import Organizer
 
     f = tmp_path / "doc.txt"
     f.write_text("x")
@@ -128,7 +128,7 @@ def test_organizer_dedups_duplicate_assignments(tmp_path):
 
 
 def test_compose_folder_name_per_duration():
-    from folderangel.organizer import compose_folder_name
+    from folder1004.organizer import compose_folder_name
 
     burst = Category(id="a", name="제안발표", group=2,
                      time_label="2024-03", duration="burst")
@@ -142,7 +142,7 @@ def test_compose_folder_name_per_duration():
                      time_label="", duration="mixed")
 
     # Every name now carries the FA signature suffix so we can
-    # detect "this is a folderangel folder" later.  The signature is
+    # detect "this is a folder1004 folder" later.  The signature is
     # 6 hex chars derived from the category id.
     import re
     fa = re.compile(r"\s\[FA·[a-f0-9]{4,12}\]$")

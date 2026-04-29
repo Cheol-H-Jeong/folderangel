@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from folderangel.metadata import collect
+from folder1004.metadata import collect
 
 
 def test_basic_metadata(tmp_path):

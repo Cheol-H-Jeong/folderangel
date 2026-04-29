@@ -4,8 +4,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from folderangel.dedup import find_duplicate_groups, remove_duplicate_files
-from folderangel.models import FileEntry
+from folder1004.dedup import find_duplicate_groups, remove_duplicate_files
+from folder1004.models import FileEntry
 
 
 def _entry(path: Path, size: int) -> FileEntry:
@@ -77,7 +77,7 @@ def test_remove_duplicate_files_deletes_dupes(tmp_path):
 
 
 def test_seed_categories_from_disk(tmp_path):
-    from folderangel.pipeline import _seed_categories_from_disk
+    from folder1004.pipeline import _seed_categories_from_disk
     (tmp_path / "1. 의약품 AI 심사 〈2025-2026〉").mkdir()
     (tmp_path / "2. 행안부 범정부 AI (2024)").mkdir()
     (tmp_path / "9. 기타").mkdir()
@@ -91,7 +91,7 @@ def test_seed_categories_from_disk(tmp_path):
 
 
 def test_seed_categories_skips_non_dir(tmp_path):
-    from folderangel.pipeline import _seed_categories_from_disk
+    from folder1004.pipeline import _seed_categories_from_disk
     f = tmp_path / "not-a-dir.txt"
     f.write_text("x")
     assert _seed_categories_from_disk(f) == []
@@ -101,8 +101,8 @@ def test_planner_passes_seeds_to_rolling(tmp_path):
     """Planner.__init__ accepts seed_categories and the rolling
     planner uses them as the initial cum_cats — no LLM call needed
     for that to be testable, just inspect the attribute."""
-    from folderangel.config import Config
-    from folderangel.planner import Planner
+    from folder1004.config import Config
+    from folder1004.planner import Planner
     seeds = [
         {"id": "drug-ai", "name": "의약품 AI 심사",
          "description": "", "duration": "annual",
@@ -116,10 +116,10 @@ def test_report_includes_dedup_ledger(tmp_path):
     """The markdown report must list every duplicate that was deleted,
     along with its canonical and the bytes recovered — so the user can
     audit the dedup pass instead of trusting a single summary line."""
-    from folderangel.models import (
+    from folder1004.models import (
         Category, MovedFile, OperationResult, LLMUsage,
     )
-    from folderangel.reporter import emit_markdown
+    from folder1004.reporter import emit_markdown
     op = OperationResult(
         target_root=tmp_path,
         started_at=datetime.now(tz=timezone.utc),
@@ -150,7 +150,7 @@ def test_get_api_key_does_not_leak_gemini_to_openai_compat(tmp_path, monkeypatch
     legacy gemini_api_key slot's value, which is what caused 401s
     when users picked their local Qwen preset.
     """
-    from folderangel.config import (
+    from folder1004.config import (
         Config, AppPaths, get_api_key, save_config,
     )
 
@@ -161,17 +161,17 @@ def test_get_api_key_does_not_leak_gemini_to_openai_compat(tmp_path, monkeypatch
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("FOLDERANGEL_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("FOLDER1004_OPENAI_API_KEY", raising=False)
 
     class FakeKeyring:
         def __init__(self):
-            self.store = {("folderangel", "gemini_api_key"): "GEMINI-SECRET"}
+            self.store = {("folder1004", "gemini_api_key"): "GEMINI-SECRET"}
 
         def get_password(self, service, slot):
             return self.store.get((service, slot))
 
     fake = FakeKeyring()
-    monkeypatch.setattr("folderangel.config._try_keyring", lambda: fake)
+    monkeypatch.setattr("folder1004.config._try_keyring", lambda: fake)
 
     cfg = Config()
     cfg.llm_provider = "gemini"
@@ -189,8 +189,8 @@ def test_make_llm_client_allows_local_without_key():
     """Local Ollama / vLLM endpoints don't need an API key — the
     client builder must synthesise a placeholder so the user doesn't
     have to register a fake one."""
-    from folderangel.config import Config
-    from folderangel.llm.client import make_llm_client, OpenAICompatClient
+    from folder1004.config import Config
+    from folder1004.llm.client import make_llm_client, OpenAICompatClient
 
     cfg = Config()
     cfg.llm_provider = "openai_compat"
@@ -205,10 +205,10 @@ def test_make_llm_client_allows_local_without_key():
 
 def test_folder_signature_round_trip():
     """compose_folder_name → parse_fa_folder_name should recover the
-    clean name + period, and is_folderangel_folder_name must say yes."""
-    from folderangel.models import Category
-    from folderangel.organizer import (
-        compose_folder_name, is_folderangel_folder_name,
+    clean name + period, and is_folder1004_folder_name must say yes."""
+    from folder1004.models import Category
+    from folder1004.organizer import (
+        compose_folder_name, is_folder1004_folder_name,
         parse_fa_folder_name, folder_signature,
     )
     cat = Category(
@@ -216,7 +216,7 @@ def test_folder_signature_round_trip():
         time_label="2025-2026", duration="multi-year", group=2,
     )
     name = compose_folder_name(cat)
-    assert is_folderangel_folder_name(name)
+    assert is_folder1004_folder_name(name)
     parsed = parse_fa_folder_name(name)
     assert parsed is not None
     assert parsed["clean_name"] == "의약품 AI 심사"
@@ -226,9 +226,9 @@ def test_folder_signature_round_trip():
 
 
 def test_folder_signature_reject_non_fa():
-    from folderangel.organizer import is_folderangel_folder_name, parse_fa_folder_name
-    assert not is_folderangel_folder_name("1. 일반 폴더")
-    assert not is_folderangel_folder_name("내가 손으로 만든 폴더")
+    from folder1004.organizer import is_folder1004_folder_name, parse_fa_folder_name
+    assert not is_folder1004_folder_name("1. 일반 폴더")
+    assert not is_folder1004_folder_name("내가 손으로 만든 폴더")
     assert parse_fa_folder_name("foo (2024)") is None
 
 
@@ -236,7 +236,7 @@ def test_additive_mode_seeds_only_fa_folders(tmp_path):
     """Additive mode's seed list must come from FA folders only —
     user-created plain folders are NOT used as categories (their
     contents will be reclassified as loose files)."""
-    from folderangel.pipeline import _seed_categories_from_disk
+    from folder1004.pipeline import _seed_categories_from_disk
     # FA folder
     (tmp_path / "1. 의약품 AI 심사 〈2025-2026〉 [FA·a3b9c1]").mkdir()
     # User-created plain folder
@@ -264,8 +264,8 @@ def test_compatibility_pulls_same_pattern_files_together():
     """
     from datetime import datetime, timezone
     from pathlib import Path
-    from folderangel.models import Category, FileEntry
-    from folderangel import similarity as sim
+    from folder1004.models import Category, FileEntry
+    from folder1004 import similarity as sim
 
     def E(name, ext=".pdf"):
         dt = datetime.now(tz=timezone.utc)
@@ -302,8 +302,8 @@ def test_extension_boost_clusters_media_batch():
     extension + pattern even when proper-noun overlap is sparse."""
     from datetime import datetime, timezone
     from pathlib import Path
-    from folderangel.models import Category, FileEntry
-    from folderangel import similarity as sim
+    from folder1004.models import Category, FileEntry
+    from folder1004 import similarity as sim
 
     def E(name, ext):
         dt = datetime.now(tz=timezone.utc)
@@ -329,8 +329,8 @@ def test_generic_pdf_alone_does_not_force_match():
     in reclassify mode — which is where the real planner runs."""
     from datetime import datetime, timezone
     from pathlib import Path
-    from folderangel.models import Category, FileEntry
-    from folderangel import similarity as sim
+    from folder1004.models import Category, FileEntry
+    from folder1004 import similarity as sim
 
     def E(name, parent, ext=".pdf"):
         dt = datetime.now(tz=timezone.utc)

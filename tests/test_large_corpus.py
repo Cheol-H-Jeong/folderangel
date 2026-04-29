@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from folderangel.rolling import signature
-from folderangel.config import Config
-from folderangel.models import FileEntry
-from folderangel.planner import Planner
+from folder1004.rolling import signature
+from folder1004.config import Config
+from folder1004.models import FileEntry
+from folder1004.planner import Planner
 
 
 def _entry(name: str, ts: float = 1700000000.0, content: str = "") -> FileEntry:
@@ -176,8 +176,8 @@ def test_time_guess_requires_token_overlap_with_category(tmp_path):
     their mtime.
     """
     from datetime import datetime, timezone
-    from folderangel.models import Category
-    from folderangel.planner import _guess_by_time
+    from folder1004.models import Category
+    from folder1004.planner import _guess_by_time
 
     project_cats = [
         Category(
@@ -229,8 +229,8 @@ def test_time_guess_rejects_generic_two_letter_ascii_overlap(tmp_path):
     project just because both contained "AI".
     """
     from datetime import datetime, timezone
-    from folderangel.models import Category
-    from folderangel.planner import _guess_by_time, _tokens_overlap
+    from folder1004.models import Category
+    from folder1004.planner import _guess_by_time, _tokens_overlap
 
     drug_ai = [
         Category(
@@ -281,7 +281,7 @@ def test_proper_noun_extraction_restricts_to_named_entities():
     must NOT survive into the proper-noun set, because they're the
     tokens that caused the original "시기로 추정" leak.
     """
-    from folderangel.morph import extract_proper_nouns, is_available
+    from folder1004.morph import extract_proper_nouns, is_available
 
     if not is_available():
         import pytest
@@ -331,7 +331,7 @@ def test_similarity_module_signal_axes():
     contrived inputs that the signal really fires."""
     from datetime import date
     from pathlib import Path
-    from folderangel import similarity as sim
+    from folder1004 import similarity as sim
 
     # Two files with identical schemas (학생 발표자료 batch shape).
     a = sim.signals_for_entry(_entry(
@@ -377,7 +377,7 @@ def test_filename_core_strips_student_id_block():
     would otherwise tie the file to a hash bucket of arbitrary
     other students' Latin tokens.
     """
-    from folderangel.similarity import signals_for_entry, _strip_filename_for_core
+    from folder1004.similarity import signals_for_entry, _strip_filename_for_core
 
     sig = signals_for_entry(_entry(
         "김민지kimminji2031_197578_10350428_11주차_ AI 치매예방돌봄 로봇 다솜.pptx"
@@ -400,8 +400,8 @@ def test_compatibility_rejects_student_to_drug_ai():
     the score falls below ``THRESHOLD_GUESS_BY_TIME`` so the rescue
     refuses the snap.  The 의약품 file goes the other way."""
     from datetime import date
-    from folderangel.models import Category
-    from folderangel import similarity as sim
+    from folder1004.models import Category
+    from folder1004 import similarity as sim
 
     drug_cat = Category(
         id="drug-ai",
@@ -439,8 +439,8 @@ def test_compatibility_rejects_student_to_drug_ai():
 def test_rolling_capacity_and_chunk_sizing():
     """The rolling planner's per-call capacity must be derived from
     the *effective* context window, not the advertised one."""
-    from folderangel import rolling
-    from folderangel.config import Config
+    from folder1004 import rolling
+    from folder1004.config import Config
 
     cfg = Config()
     cfg.model = "gemini-2.5-flash"
@@ -470,8 +470,8 @@ def test_rolling_skips_for_tiny_corpus_or_starved_ctx():
     """should_use_rolling must NOT fire for sub-MIN_CHUNK corpora
     (too small) or for models that can't take MIN_CHUNK_FILES per
     call (better routed to micro-batch)."""
-    from folderangel import rolling
-    from folderangel.config import Config
+    from folder1004 import rolling
+    from folder1004.config import Config
 
     cfg = Config()
     cfg.model = "gemini-2.5-flash"
@@ -487,7 +487,7 @@ def test_rolling_collapses_duplicate_signatures():
     """Files with identical signatures (e.g. 100 weekly invoices that
     differ only by date) must collapse into a single FileRow — sending
     100 nearly-identical rows wastes the prompt budget."""
-    from folderangel import rolling
+    from folder1004 import rolling
 
     entries = (
         [_entry(f"강의평가_{i:03}.pdf", content="강의 평가 의견 본문") for i in range(50)]
@@ -508,8 +508,8 @@ def test_rolling_end_to_end_with_fake_llm(tmp_path):
     """Walk the full rolling-plan path with a fake LLM that returns a
     minimal response — verify fid expansion replicates the assignment
     to every collapsed sibling."""
-    from folderangel.config import Config
-    from folderangel.planner import Planner
+    from folder1004.config import Config
+    from folder1004.planner import Planner
 
     cfg = Config()
     cfg.model = "gemini-2.5-flash"
@@ -583,7 +583,7 @@ def test_singleton_absorption_collapses_tiny_categories():
     closest larger category (proper-noun overlap) or into misc, so
     the user does not see a forest of 1-file folders.
     """
-    from folderangel.planner import Planner
+    from folder1004.planner import Planner
 
     cfg = Config()
     cfg.model = "gemini-2.5-flash"
@@ -639,7 +639,7 @@ def test_singleton_absorption_collapses_tiny_categories():
     p = Planner(cfg, gemini=_Fake())
     payloads = [e.to_summary_dict() for e in entries]
     raw = p._rolling_plan(entries, payloads, progress=None)
-    from folderangel.planner import _plan_from_dict
+    from folder1004.planner import _plan_from_dict
     plan = _plan_from_dict(raw, entries, reclassify_mode=True)
     cat_ids = {c.id for c in plan.categories}
     assert "lecture-ai" in cat_ids

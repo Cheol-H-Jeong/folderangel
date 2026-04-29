@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from folderangel.config import default_paths
+from folder1004.config import default_paths
 
 
 def test_default_paths_uses_platform_dir(tmp_path, monkeypatch):
     """Each OS should pick its conventional data dir."""
-    monkeypatch.delenv("FOLDERANGEL_HOME", raising=False)
+    monkeypatch.delenv("FOLDER1004_HOME", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -22,17 +22,17 @@ def test_default_paths_uses_platform_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
     p = default_paths()
     if sys.platform.startswith("win"):
-        assert "FolderAngel" in str(p.root)
+        assert "Folder1004" in str(p.root)
     elif sys.platform == "darwin":
-        # On macOS we expect Library/Application Support/FolderAngel
-        # *or* the legacy ~/.folderangel if it pre-exists.
-        assert ("Application Support" in str(p.root)) or str(p.root).endswith(".folderangel")
+        # On macOS we expect Library/Application Support/Folder1004
+        # *or* the legacy ~/.folder1004 if it pre-exists.
+        assert ("Application Support" in str(p.root)) or str(p.root).endswith(".folder1004")
     else:
-        assert ("share/folderangel" in str(p.root)) or str(p.root).endswith(".folderangel")
+        assert ("share/folder1004" in str(p.root)) or str(p.root).endswith(".folder1004")
 
 
 def test_default_paths_honours_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("FOLDERANGEL_HOME", str(tmp_path / "custom"))
+    monkeypatch.setenv("FOLDER1004_HOME", str(tmp_path / "custom"))
     p = default_paths()
     assert p.root == tmp_path / "custom"
 
@@ -42,7 +42,7 @@ def test_parser_timeout_works_off_main_thread(tmp_path):
     only works on the POSIX main thread.  Verify it now fires correctly
     from a worker thread, on every OS."""
     import threading
-    from folderangel.parsers.registry import _safe
+    from folder1004.parsers.registry import _safe
 
     def slow(_p, _n):
         import time
@@ -60,7 +60,7 @@ def test_parser_timeout_works_off_main_thread(tmp_path):
 
 def test_index_open_with_long_path(tmp_path):
     """SQLite + WAL must work in a deeply-nested path (Windows MAX_PATH)."""
-    from folderangel.index import IndexDB
+    from folder1004.index import IndexDB
     deep = tmp_path
     for i in range(10):
         deep = deep / f"세부폴더_{i:02d}"
@@ -75,8 +75,8 @@ def test_korean_filename_round_trips_through_index(tmp_path):
     every filesystem.  Catches HFS+ NFD vs APFS NFC differences and
     NTFS UTF-16 quirks."""
     from datetime import datetime
-    from folderangel.index import IndexDB
-    from folderangel.models import Category, MovedFile, OperationResult
+    from folder1004.index import IndexDB
+    from folder1004.models import Category, MovedFile, OperationResult
 
     folder = tmp_path / "프로젝트"
     folder.mkdir()

@@ -1,8 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 
-from folderangel.models import Category, MovedFile, OperationResult
-from folderangel.reporter import emit_markdown
+from folder1004.models import Category, MovedFile, OperationResult
+from folder1004.reporter import emit_markdown
 
 
 def test_emit_markdown(tmp_path):
@@ -28,5 +28,5 @@ def test_emit_markdown(tmp_path):
     path = emit_markdown(op, tmp_path)
     assert path.exists()
     text = path.read_text(encoding="utf-8")
-    assert "FolderAngel Report" in text
+    assert "Folder1004 Report" in text
     assert "notes" in text

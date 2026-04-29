@@ -6,7 +6,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-from folderangel.parsers import archive, registry
+from folder1004.parsers import archive, registry
 
 
 def test_zip_lists_member_names(tmp_path):

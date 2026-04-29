@@ -6,7 +6,7 @@ we verify the noise filters (person names, dates, clerical nouns).
 """
 import pytest
 
-from folderangel import morph
+from folder1004 import morph
 
 
 def test_module_imports_without_kiwi():

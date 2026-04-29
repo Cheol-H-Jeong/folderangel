@@ -1,6 +1,6 @@
 """Auto micro-batch policy: small prompt → single call, large → micro-batch."""
-from folderangel.config import Config
-from folderangel.planner import Planner
+from folder1004.config import Config
+from folder1004.planner import Planner
 
 
 class FakeClient:

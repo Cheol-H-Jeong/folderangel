@@ -9,7 +9,7 @@ import pytest
 if not sys.platform.startswith("linux"):
     pytest.skip("linux-only", allow_module_level=True)
 
-from folderangel.shortcuts import create_shortcut
+from folder1004.shortcuts import create_shortcut
 
 
 def test_shortcut_is_indistinguishable_from_real_file(tmp_path):

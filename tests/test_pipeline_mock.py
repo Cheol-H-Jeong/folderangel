@@ -1,9 +1,9 @@
 """End-to-end smoke test with the mock planner."""
 from pathlib import Path
 
-from folderangel.config import Config
-from folderangel.index import IndexDB
-from folderangel.pipeline import run
+from folder1004.config import Config
+from folder1004.index import IndexDB
+from folder1004.pipeline import run
 
 
 def test_full_pipeline_mock(tmp_path, monkeypatch):

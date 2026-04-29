@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from folderangel.scanner import ScanTooLargeError, scan
+from folder1004.scanner import ScanTooLargeError, scan
 
 
 def _touch(p: Path, data: bytes = b"x"):

@@ -1,8 +1,8 @@
 """Sanitiser must reject corrupt LLM output; recovery must cope with
 truncated JSON that ran out of ``max_tokens`` mid-stream.
 """
-from folderangel.organizer import sanitize_folder_name
-from folderangel.llm.client import _recover_truncated_json
+from folder1004.organizer import sanitize_folder_name
+from folder1004.llm.client import _recover_truncated_json
 
 
 def test_replacement_char_is_stripped():
@@ -62,9 +62,9 @@ def test_organizer_quarantines_preexisting_mojibake_folder(tmp_path):
     """User-reported case: pre-existing mojibake-named folders must be
     cleaned up — empty ones deleted, non-empty ones merged into the
     single canonical "9. 기타" bucket (no "기타 (2)" siblings)."""
-    from folderangel.config import Config
-    from folderangel.models import Plan
-    from folderangel.organizer import Organizer
+    from folder1004.config import Config
+    from folder1004.models import Plan
+    from folder1004.organizer import Organizer
 
     bad_empty = tmp_path / "6. ì ì¡° AI ì¤ì¦ ì§ì (2024)"
     bad_empty.mkdir()
@@ -94,9 +94,9 @@ def test_organizer_uses_median_mtime_of_files(tmp_path):
     files inside it, not the LLM's time_label heuristic."""
     import os
     from datetime import datetime, timezone
-    from folderangel.config import Config
-    from folderangel.models import Assignment, Category, Plan
-    from folderangel.organizer import Organizer
+    from folder1004.config import Config
+    from folder1004.models import Assignment, Category, Plan
+    from folder1004.organizer import Organizer
 
     # Three source files with known mtimes spread across years.
     targets = []
@@ -128,8 +128,8 @@ def test_organizer_uses_median_mtime_of_files(tmp_path):
 
 
 def test_safe_path_repr_redacts_mojibake_parents():
-    from folderangel.llm.client import _looks_like_mojibake
-    from folderangel.planner import _safe_path_repr
+    from folder1004.llm.client import _looks_like_mojibake
+    from folder1004.planner import _safe_path_repr
 
     bad = "/work/6. ì ì¡° AI ì¤ì¦ ì§ì (2024)/제안서_v1.pdf"
     out = _safe_path_repr(bad, _looks_like_mojibake)
@@ -141,8 +141,8 @@ def test_safe_path_repr_redacts_mojibake_parents():
 def test_planner_drops_mojibake_category_in_otherwise_clean_response():
     """The leak path: only one of several category names is mojibake."""
     from pathlib import Path
-    from folderangel.models import FileEntry
-    from folderangel.planner import _plan_from_dict
+    from folder1004.models import FileEntry
+    from folder1004.planner import _plan_from_dict
     from datetime import datetime
 
     now = datetime.now().astimezone()
