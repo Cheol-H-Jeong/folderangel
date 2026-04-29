@@ -1,11 +1,11 @@
-# FolderAngel — Functional & UI Specification
+# Folder1004 — Functional & UI Specification
 
 | 항목 | 내용 |
 | --- | --- |
 | 문서 버전 | 1.0 |
 | 최종 수정 | 2026-04-25 |
-| 작성자 | FolderAngel Core Team |
-| 제품명 | FolderAngel |
+| 작성자 | Folder1004 Core Team |
+| 제품명 | Folder1004 |
 | 플랫폼 | Linux (X11/Wayland), Windows 10+ |
 | 런타임 | Python 3.11+ / PySide6 |
 | 배포 형태 | 소스, PyInstaller 단일 실행 파일 |
@@ -15,10 +15,10 @@
 ## 1. 제품 개요
 
 ### 1.1 목적
-FolderAngel은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반으로 의미 분류**하여 **직관적인 하위 폴더로 자동 정리**해 주는 크로스플랫폼 데스크톱 애플리케이션이다. 단순 확장자/규칙 기반이 아닌 **파일명·메타데이터·문서 본문 요약**을 종합해 분류하므로, 사람이 수동으로 정리한 것과 유사한 수준의 폴더 체계를 생성한다.
+Folder1004은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반으로 의미 분류**하여 **직관적인 하위 폴더로 자동 정리**해 주는 크로스플랫폼 데스크톱 애플리케이션이다. 단순 확장자/규칙 기반이 아닌 **파일명·메타데이터·문서 본문 요약**을 종합해 분류하므로, 사람이 수동으로 정리한 것과 유사한 수준의 폴더 체계를 생성한다.
 
 ### 1.2 배경
-개인/업무용 다운로드 폴더, 자료 아카이브, 강의 자료 등은 시간이 지나면 수백 수천 개 파일로 누적된다. 기존 규칙 기반 툴(File Juggler, Maid 등)은 확장자·이름 패턴 수준에 그쳐 맥락을 반영하지 못한다. FolderAngel은 LLM을 **폴더 구조 결정**과 **분류 계획 수립** 단계에만 제한적으로 사용하여, 비용 통제와 설명가능성을 유지하면서 의미 기반 정리를 제공한다.
+개인/업무용 다운로드 폴더, 자료 아카이브, 강의 자료 등은 시간이 지나면 수백 수천 개 파일로 누적된다. 기존 규칙 기반 툴(File Juggler, Maid 등)은 확장자·이름 패턴 수준에 그쳐 맥락을 반영하지 못한다. Folder1004은 LLM을 **폴더 구조 결정**과 **분류 계획 수립** 단계에만 제한적으로 사용하여, 비용 통제와 설명가능성을 유지하면서 의미 기반 정리를 제공한다.
 
 ### 1.3 비목표 (Non-Goals)
 - 파일 내용 자체의 편집·요약·번역 기능.
@@ -80,6 +80,9 @@ FolderAngel은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반
 | FR-LLM-05 | LLM 응답은 반드시 JSON 스키마를 준수해야 하며, 파싱 실패 시 1회 재시도 후 Mock으로 폴백. | M |
 | FR-LLM-06 | 파일당 토큰 소비를 제한하기 위해 본문 요약은 1,800자(≈600 토큰 KR 기준)로 절단 후 전송. | M |
 | FR-LLM-07 | 사용자는 LLM 호출 총 토큰/비용 추정을 실행 전에 확인할 수 있다. | S |
+| FR-LLM-08 | **폴더 성격 감지**: 대상 폴더의 파일명, 확장자 분포, 작성/수정 시점, 하위 폴더명, 대표 본문을 바탕으로 `다운로드`, `카카오톡 다운로드`, `바탕화면`, `내문서`, `디자인/촬영 스튜디오`, `공무/행정`, `교사/수업`, `학생/대학생`, `연구/논문`, `사업/회계`, `혼합/불명` 중 하나 이상의 프로필을 추론한다. | S |
+| FR-LLM-09 | **프로필별 분류 스타일**: 감지된 폴더 성격에 따라 카테고리 후보의 우선순위를 바꾼다. 예: 사진 스튜디오는 `촬영일·고객·원본/보정/납품`, 교사는 `학급·과목·학기·평가`, 공무/행정은 `사업명·기관·연도·결재/증빙`, 대학생은 `학기·강의·과제·시험`, 다운로드 폴더는 `설치파일·문서·이미지·압축·임시`를 우선한다. | S |
+| FR-LLM-10 | **폴더명 품질 강화**: 폴더명은 단순 주제명뿐 아니라 프로필이 드러나는 맥락 라벨을 포함한다. 예: `2. 김민수 고객 촬영본 〈2026-04〉`, `3. 2학년 수학 수행평가 〈2026-1학기〉`, `4. 보조금 정산 증빙 〈2025〉`. | S |
 
 ### 3.4 폴더 생성 & 이동
 | ID | 요구사항 | 우선 |
@@ -91,11 +94,13 @@ FolderAngel은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반
 | FR-ORG-05 | **모호 분류(멀티 소속)**: top1 점수와 top2 점수 차가 설정 임계값(기본 0.15) 이하일 경우, top1에 실 이동하고 나머지 후보 폴더에는 OS별 **바로가기(Linux: symlink, Windows: .lnk)** 를 생성한다. | M |
 | FR-ORG-06 | 바로가기는 `원본파일명.lnk` 또는 `원본파일명` 심볼릭 링크로 생성하며, 대상은 최종 이동된 파일의 **절대 경로**를 가리킨다. | M |
 | FR-ORG-07 | 모든 원본 경로·대상 경로를 인덱스에 기록하여 롤백·검색에 사용한다. | M |
+| FR-ORG-08 | **버림 후보 격리**: 깨진 다운로드, 임시/캐시 파일, 오래된 설치 파일, 중복 가능 압축본, 빈 파일, OS 부산물 등은 삭제하지 않고 `정리검토_버림후보` 같은 검토 폴더로 이동하거나 Dry-Run 리포트에 격리 제안으로 표시한다. | S |
+| FR-ORG-09 | 버림 후보는 실제 삭제하지 않는다. 삭제 기능은 별도 명시적 사용자 선택과 되돌리기 가능한 기록이 있을 때만 제공한다. | M |
 
 ### 3.5 인덱스 & 검색
 | ID | 요구사항 | 우선 |
 | --- | --- | --- |
-| FR-IDX-01 | 실행 결과는 앱 전용 SQLite DB(`~/.folderangel/index.db`)에 저장한다. | M |
+| FR-IDX-01 | 실행 결과는 앱 전용 SQLite DB(`~/.folder1004/index.db`)에 저장한다. | M |
 | FR-IDX-02 | SQLite FTS5를 사용하여 파일명·폴더명·카테고리·원본 경로를 전문 검색 가능. | M |
 | FR-IDX-03 | 검색 결과는 원본 경로, 현재 위치, 정리 시각, 카테고리, 사유(LLM reason)를 포함한다. | M |
 | FR-IDX-04 | 롤백 기능은 인덱스에 기록된 `operation_id` 단위로 동작한다. | S |
@@ -103,16 +108,31 @@ FolderAngel은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반
 ### 3.6 리포트
 | ID | 요구사항 | 우선 |
 | --- | --- | --- |
-| FR-REP-01 | 실행 후 **요약 리포트**(총 파일 수, 이동 수, 바로가기 수, 스킵 수, 카테고리별 파일 분포)를 화면과 Markdown 파일(`{target}/FolderAngel_Report_{timestamp}.md`)로 생성한다. | M |
+| FR-REP-01 | 실행 후 **요약 리포트**(총 파일 수, 이동 수, 바로가기 수, 스킵 수, 카테고리별 파일 분포)를 화면과 Markdown 파일(`{target}/Folder1004_Report_{timestamp}.md`)로 생성한다. | M |
 | FR-REP-02 | 리포트는 **전/후 파일 트리**를 포함한다(최대 500 파일 범위). | S |
 | FR-REP-03 | 각 파일에 대해 **분류 사유**(LLM reason)를 포함한다. | S |
+| FR-REP-04 | **방치 폴더 건강 점수**: 폴더별로 혼잡도(루트 파일 수), 오래된 파일 비율, 임시/버림 후보 수, 중복 후보 수, 이름 없는 스크린샷/다운로드 비율, 최근 신규 파일 증가량을 0~100점으로 산출한다. | S |
+| FR-REP-05 | 건강 리포트는 “지금 정리하면 좋아지는 항목”을 사람이 이해하기 쉬운 문장으로 보여준다. 예: `1년 이상 방치된 설치 파일 43개`, `카카오톡 이미지가 월별로 섞여 있음`, `수업 자료와 평가 자료가 같은 위치에 섞여 있음`. | S |
 
 ### 3.7 설정
 | ID | 요구사항 | 우선 |
 | --- | --- | --- |
-| FR-CFG-01 | 설정은 `~/.folderangel/config.json`에 보관한다. | M |
+| FR-CFG-01 | 설정은 `~/.folder1004/config.json`에 보관한다. | M |
 | FR-CFG-02 | Gemini API 키는 OS keyring이 가능하면 keyring에, 실패 시 config.json 평문에 저장(경고 표시). | M |
 | FR-CFG-03 | 사용자는 모델명, 배치 크기, 카테고리 범위, 모호 임계값, 본문 최대 길이를 조정할 수 있다. | S |
+| FR-CFG-04 | 사용자는 상시 감시할 폴더 목록을 지정할 수 있다. 기본 추천 후보는 다운로드, 바탕화면, 내문서, 카카오톡 다운로드 폴더이며, 각 폴더마다 감지된 프로필·정리 모드·자동 실행 여부를 따로 저장한다. | S |
+| FR-CFG-05 | Windows에서는 시작 프로그램 등록을 지원한다. 재부팅 후에는 메인 창을 띄우지 않고 시스템 트레이/알림 영역에 조용히 실행된다. | S |
+| FR-CFG-06 | 사용자는 UI에서 “분류 원칙”을 자연어로 입력할 수 있다. 입력한 원칙은 모든 LLM 분류 프롬프트에 함께 전달되어 사용자가 선호하는 정리 방향을 반영한다. | M |
+| FR-CFG-07 | 분류 원칙 입력 영역 주변에는 클릭형 프리셋을 제공한다. 사용자는 `프로젝트 중심`, `업무/용도 중심`, `날짜/기간 중심`, `사람/고객 중심`, `보수적으로 정리`, `버림 후보 분리` 같은 버튼만 눌러도 자연어 원칙을 채울 수 있다. | M |
+
+### 3.8 상시 정리 천사
+| ID | 요구사항 | 우선 |
+| --- | --- | --- |
+| FR-ANGEL-01 | 앱은 사용자가 지정한 감시 폴더를 주기적으로 스캔해 신규 파일 증가, 건강 점수 악화, 오래 방치된 버림 후보를 감지한다. | S |
+| FR-ANGEL-02 | 사용자가 컴퓨터를 사용하지 않는 것으로 보이는 시간(입력 없음, 전체화면/통화/게임 등 방해 금지 상황 제외)에만 자동 정리 제안을 만든다. | S |
+| FR-ANGEL-03 | 아직 정리한 적 없는 폴더는 `신규 정리 모드`, 이미 Folder1004가 만든 폴더 구조가 있는 곳은 기존 카테고리를 보존한 `추가 정리 모드`를 기본 적용한다. | S |
+| FR-ANGEL-04 | 상시 모드는 기본적으로 자동 이동하지 않고 트레이 알림으로 정리 제안서를 보여준다. 사용자가 폴더별로 `자동 실행 허용`을 켠 경우에도 버림 후보 삭제는 하지 않는다. | M |
+| FR-ANGEL-05 | 트레이 메뉴는 `지금 정리`, `정리 제안 보기`, `감시 일시 중지`, `최근 리포트`, `설정 열기`, `종료`를 제공한다. | S |
 
 ---
 
@@ -126,7 +146,7 @@ FolderAngel은 사용자가 지정한 폴더 내부의 파일들을 **LLM 기반
 | NFR-04 | **프라이버시**: LLM에 전송되는 텍스트는 "파일명, 확장자, 날짜, 1,800자 요약"으로 한정. 본문 원본을 서버에 저장하지 않는다. 옵트인 로그만 기록. |
 | NFR-05 | **접근성**: 최소 1280×720 해상도, 다크/라이트 모드 자동 전환, 키보드 전용 조작 가능. |
 | NFR-06 | **국제화**: 한국어/영어 UI. 기본 ko-KR. |
-| NFR-07 | **로깅**: `~/.folderangel/logs/`에 rotating 로그. 레벨: INFO/ERROR. |
+| NFR-07 | **로깅**: `~/.folder1004/logs/`에 rotating 로그. 레벨: INFO/ERROR. |
 
 ---
 
@@ -169,21 +189,43 @@ shortcuts(id, op_id, file_id, shortcut_path)
 fts(files_fts: filename, folder, category, reason, original_path)
 ```
 
+### 5.5 폴더 프로필 (`FolderProfile`)
+```
+root: str
+kind: str                  # downloads | kakao | desktop | documents | photo_studio | teacher | student | admin | mixed ...
+confidence: float          # 0..1
+signals: dict              # ext distribution, filename hints, date bursts, known path hints
+preferred_taxonomy: list   # profile-specific category axes
+```
+
+### 5.6 건강 점수 (`FolderHealth`)
+```
+root: str
+score: int                 # 0..100, higher is cleaner
+file_count: int
+root_file_count: int
+stale_count: int
+trash_candidate_count: int
+duplicate_candidate_count: int
+recommendations: list[str]
+```
+
 ---
 
 ## 6. 처리 파이프라인
 
 ```
-① Select folder (UI)
+① Select folder (UI / tray watcher)
 ② Scan + recursion flag → FileEntry[]
-③ For each file (parallel, thread pool):
+③ Detect FolderProfile + FolderHealth
+④ For each file (parallel, thread pool):
       metadata + parse excerpt
-④ PlannerStageA(batches) → category_candidates[]
-⑤ PlannerStageAMerge(candidates) → final_categories[]
-⑥ PlannerStageB(file_batches, final_categories) → Assignment[]
-⑦ Organizer.execute(Assignments, dry_run?)
-⑧ IndexWriter.record(op, files, shortcuts)
-⑨ Reporter.emit(op)
+⑤ PlannerStageA(batches, profile) → category_candidates[]
+⑥ PlannerStageAMerge(candidates, profile) → final_categories[]
+⑦ PlannerStageB(file_batches, final_categories, profile) → Assignment[] + trash_candidates[]
+⑧ Organizer.execute(Assignments, dry_run?)
+⑨ IndexWriter.record(op, files, shortcuts, profile, health)
+⑩ Reporter.emit(op, profile, health)
 ```
 
 ---
@@ -198,6 +240,9 @@ fts(files_fts: filename, folder, category, reason, original_path)
 | 파일 이동 권한 오류 | 스킵 + 리포트 |
 | 디스크 공간 부족 | 실행 전 체크(예상 이동 용량 vs 가용 용량) |
 | 중복 실행 방지 | 동일 폴더 대상 작업은 파일 락으로 1개만 허용 |
+| 프로필 감지 신뢰도 낮음 | `혼합/불명` 프로필로 처리하고 범용 분류 스타일 사용 |
+| 상시 모드 중 사용자가 복귀 | 자동 실행 보류, 트레이 알림만 남김 |
+| 버림 후보 오탐 가능성 | 삭제 금지, 검토 폴더 격리 또는 Dry-Run 제안으로 제한 |
 
 ---
 
@@ -220,7 +265,9 @@ fts(files_fts: filename, folder, category, reason, original_path)
   - 완료: 리포트 카드(파일 수, 카테고리 수, 바로가기 수 + "리포트 열기" + "되돌리기").
 - **Search 탭**: 검색창(포커스 단축키 Ctrl/⌘+F) + 결과 리스트(파일명, 카테고리, 현재 경로, 원본 경로, 일시).
 - **History 탭**: 최근 정리 작업 리스트(시간, 대상 폴더, 파일 수). 행 클릭 시 리포트 보기/롤백.
-- **Settings 탭**: API 키 입력(비밀번호 입력 스타일), 모델, 배치 크기, 모호 임계값, 언어, 데이터 경로.
+- **Health 탭**: 감시 폴더별 건강 점수, 방치 원인, 버림 후보, 정리 후 예상 개선치를 카드로 표시.
+- **Settings 탭**: API 키 입력(비밀번호 입력 스타일), 모델, 분류 원칙 자연어 입력, 클릭형 분류 프리셋, 배치 크기, 모호 임계값, 언어, 데이터 경로, 감시 폴더, 시작 시 트레이 실행.
+- **System tray**: Windows 알림 영역에서 조용히 상주하며 감시 상태와 최근 정리 제안을 표시.
 
 ### 8.3 상호작용 규칙
 - 모든 장시간 작업은 취소 가능해야 한다(Worker thread + cancel flag).
@@ -244,7 +291,7 @@ fts(files_fts: filename, folder, category, reason, original_path)
 ## 9. 릴리즈 범위 (v1.0 MVP)
 
 - **포함**: FR-SCAN-01~06, FR-PARSE-01~04, FR-LLM-01~06, FR-ORG-01~07, FR-IDX-01~03, FR-REP-01~03, FR-CFG-01~02, 전체 NFR-01~07, UI Organize/Search/History/Settings.
-- **이후**: 롤백(FR-IDX-04)은 데이터는 기록하되 UI 완성도는 베타 수준; 토큰 비용 프리뷰(FR-LLM-07), 세부 설정(FR-CFG-03)은 v1.1.
+- **이후**: 롤백(FR-IDX-04)은 데이터는 기록하되 UI 완성도는 베타 수준; 토큰 비용 프리뷰(FR-LLM-07), 세부 설정(FR-CFG-03)은 v1.1. 폴더 성격 감지, 버림 후보 격리, 건강 점수, 상시 정리 천사는 v1.1~v1.2 핵심 확장 기능으로 추진한다.
 
 ---
 

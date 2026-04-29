@@ -60,7 +60,7 @@ files  ───▶│ scan (parallel) │───▶│ parser-cache │──
 - New ``ThreadPoolExecutor`` parses up to N files concurrently
   (IO-bound; `os.cpu_count()`-capped).
 - Each file's parsed excerpt is stored in
-  ``~/.folderangel/parser_cache.db`` keyed by
+  ``~/.folder1004/parser_cache.db`` keyed by
   ``(absolute_path, mtime, size)``.  Subsequent runs read the cache —
   the LLM never sees files that haven't changed.
 
